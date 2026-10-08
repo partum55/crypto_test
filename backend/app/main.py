@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
 from app.config import get_settings
+from app.services.charts import ChartService
 from app.services.coingecko import CoinGeckoClient
 from app.services.details_store import DetailsStore
 from app.services.projects import ProjectService
@@ -29,9 +30,11 @@ async def lifespan(app: FastAPI):
     ) as http:
         store = DetailsStore(settings.db_path)
         await asyncio.to_thread(store.init)  # creates data/coins.db and the table if missing
-        projects = ProjectService(CoinGeckoClient(http, settings), store, settings)
+        client = CoinGeckoClient(http, settings)
+        projects = ProjectService(client, store, settings)
         projects.start_refresh()  # warm the cache so the first request doesn't wait minutes
         app.state.projects = projects
+        app.state.charts = ChartService(client, settings)
         yield
         await projects.stop()
 

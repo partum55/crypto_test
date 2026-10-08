@@ -90,6 +90,32 @@ Details, features and design decisions are in [`frontend/NOTES.md`](frontend/NOT
 - `502`: CoinGecko was unreachable or returned an unexpected error.
 - CORS allows `http://localhost:3000` (configurable via `CORS_ORIGINS`).
 
+### `GET /api/projects/{coin_id}?days=7`
+
+Details for one coin. `days` must be `1`, `7` (default) or `30`; anything else returns `422`.
+
+```json
+{
+  "project": { "id": "dodo", "symbol": "dodo", "name": "DODO", "...": "same fields as list items" },
+  "details": { "preview_listing": false, "tvl_usd": 12469538.0, "checked_at": "2026-10-08T19:55:16Z" },
+  "passes": { "market_cap": true, "fdv": true, "volume": true, "supply": true,
+              "tvl": true, "preview_listing": false },
+  "chart": { "days": 7, "prices": [[1790888400000, 0.0184]], "volumes": [[1790888400000, 16709522.9]] },
+  "meta": { "fetched_at": "2026-10-08T20:17:07Z", "chart_cached": false, "chart_error": null }
+}
+```
+
+- **Allow-list:** only ids from the current market scan (about 2,750 coins) are accepted. Anything else returns `404`, so the backend can't be used to proxy arbitrary CoinGecko requests. `503` while warming up, same as the list endpoint.
+- **Data sources:**
+  - `project` comes from the cached market scan and is never re-fetched for this endpoint. The fields share the list schema, but they can be `null` here, because any scanned coin is allowed, not only coins that passed.
+  - `details` is the stored SQLite row. It is `null` if the coin was never checked via `/coins/{id}`, which happens when it failed the market filters.
+- **`passes`** gives every criterion's result, so the UI can show which rules a coin fails. A null or unknown value counts as a fail. Keys: `market_cap`, `fdv`, `volume`, `supply`, `tvl`, `preview_listing`.
+- **`chart`** comes from `/coins/{id}/market_chart?vs_currency=usd&days=N`:
+  - It goes through the shared rate limiter and retries. It skips the background concurrency queue, so it never waits behind a detail refresh.
+  - It is cached in memory per `(id, days)` for 10 min (`CHART_CACHE_TTL_SECONDS`).
+  - It is downsampled to at most 200 points by keeping every k-th point plus the last one. The raw sizes are 288, 168 and 720 points for 1, 7 and 30 days.
+- **Chart errors:** if the chart call fails or exceeds `CHART_TIMEOUT` (20s), the response is still `200`, with `chart: null` and `meta.chart_error` holding CoinGecko's error. Failures are not cached.
+
 ## How it works
 
 The data is split across two endpoints, so the pipeline runs in two steps:
@@ -153,8 +179,9 @@ Of the 685 market-filtered candidates, **none** has `preview_listing == true`, r
 
 - [x] Backend: FastAPI, async httpx client, two-step filter pipeline, caching, rate limiting, retries, CORS, `/health`
 - [x] SQLite persistence for coin details: fast restarts, and only stale or new coins are re-checked
+- [x] Coin detail endpoint `GET /api/projects/{coin_id}` (allow-listed ids, per-criterion `passes`, cached and downsampled chart)
 - [x] `meta.funnel` (cumulative per-criterion counts) and `require_preview` query param (documented deviation)
-- [x] Unit tests (no network; temp DB) for the filters, the client's paging/retries, the store, the combine/select/funnel steps, the service pipeline including the restart path, and the query param
+- [x] Unit tests (no network; temp DB) for the filters, the client's paging/retries, the store, the combine/select/funnel steps, the service pipeline including the restart path, the query param, and the detail endpoint (404/422, `passes`, chart cache, chart failure)
 - [x] Frontend: Next.js app with a screening funnel, search, sorting and a preview-listing toggle (see `frontend/NOTES.md`)
 
 ## Next steps

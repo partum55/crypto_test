@@ -1,6 +1,7 @@
 """Thin async client for the two CoinGecko endpoints we need."""
 
 import asyncio
+import contextlib
 import logging
 import time
 from typing import Any
@@ -53,7 +54,13 @@ class CoinGeckoClient:
         self._semaphore = asyncio.Semaphore(settings.concurrency)
         self._limiter = MinIntervalLimiter(settings.min_request_interval)
 
-    async def _get(self, path: str, params: dict[str, Any]) -> Any:
+    async def _get(self, path: str, params: dict[str, Any], interactive: bool = False) -> Any:
+        """GET with retries. Every call goes through the rate limiter.
+
+        `interactive` calls (user-facing, one at a time) skip the concurrency semaphore so
+        they don't queue behind hundreds of background detail fetches; the limiter still
+        spaces them out with everything else.
+        """
         last_error = "unknown error"
         rate_limited = False
         retry_after: str | None = None
@@ -61,7 +68,7 @@ class CoinGeckoClient:
             if attempt:
                 await asyncio.sleep(self._backoff(attempt, retry_after))
             retry_after = None
-            async with self._semaphore:
+            async with contextlib.nullcontext() if interactive else self._semaphore:
                 await self._limiter.wait()
                 try:
                     response = await self.http.get(path, params=params)
@@ -111,6 +118,13 @@ class CoinGeckoClient:
             if (data[-1].get("total_volume") or 0) <= self.s.volume_min:
                 break
         return list(rows.values()), pages
+
+    async def fetch_market_chart(self, coin_id: str, days: int) -> dict[str, Any]:
+        return await self._get(
+            f"/coins/{coin_id}/market_chart",
+            {"vs_currency": "usd", "days": days},
+            interactive=True,
+        )
 
     async def fetch_detail(self, coin_id: str) -> dict[str, Any]:
         return await self._get(f"/coins/{coin_id}", DETAIL_PARAMS)

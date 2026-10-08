@@ -29,10 +29,13 @@ Tool: Claude Code (Claude Opus 5.5). I wrote the brief; the AI planned, generate
 - **`uv init --app` packaging.** In uv 0.12 it created a packaged `src/` layout, so I re-ran it with `--no-package` to match the target structure.
 - `asyncio.TaskGroup` wraps failures in an `ExceptionGroup`. The service now unwraps it so the route still returns a clean 503/502.
 - Added `meta.preview_listed` and `meta.tvl_above_min` after the first full run returned 0 matches, so the empty result can be explained.
-- **SQLite for details (my follow-up request).** The in-memory detail cache was replaced by `backend/data/coins.db` (stdlib `sqlite3`, run via `asyncio.to_thread`). As a result `services/cache.py` was removed: the final result is the in-memory snapshot in `projects.py`, and details live in SQLite. This is a deliberate deviation from the original target structure.
+- **SQLite for details (my follow-up request).** The in-memory detail cache was replaced by `backend/data/coins.db` (stdlib `sqlite3`, run via `asyncio.to_thread`). As a result `services/cache.py` was removed: the final result is the in-memory snapshot in `projects.py`, and details live in SQLite. This is a deliberate deviation from the original target structure. (`cache.py` came back later as the 10-minute TTL cache for coin charts.)
 
 - **`require_preview` and `meta.funnel` (my follow-up request).** The preview rule is now applied per request from the cached snapshot. `require_preview=false` is documented as a deviation for inspecting the pipeline.
 - **Checking the README citation.** The support page I cited is behind Cloudflare (403 for plain fetches), so the AI read it through the help center's public JSON API (`/api/v2/help_center/en-us/articles/<id>.json`). That confirmed the "if your token has not launched yet" wording. It also found the linked preview-listing guide, which says preview-listed tokens "will not track price data immediately". Both are quoted in the README as evidence, not as a confirmed fact about the API.
+
+- **Coin detail endpoint (my follow-up request).** `GET /api/projects/{coin_id}` only accepts ids from the cached market scan, so it can't proxy arbitrary CoinGecko lookups. The `market_chart` shape was checked live first: `prices`/`total_volumes` are `[ts_ms, value]`, with 288, 168 and 720 points for 1, 7 and 30 days. Chart failures come back as `chart: null` plus `meta.chart_error` instead of failing the whole response.
+- **`days` validation.** The AI first tried `Literal[1, 7, 30]` for `days`. A quick check showed FastAPI rejects every query string with it, including valid values, so it switched to an `IntEnum`.
 
 ## Measured results (Demo key, 2026-10-08)
 - Full run: 2,748 coins scanned on 11 pages → 692 passed the cheap filters → 107 with TVL > $50k, **0 preview-listed** → **0 matches**. No 429s at 1.5 req/s.

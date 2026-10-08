@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     details_ttl_seconds: int = 6 * 3600
     db_path: Path = BACKEND_DIR / "data" / "coins.db"
 
+    # Coin detail charts (/coins/{id}/market_chart), cached per (id, days).
+    chart_cache_ttl_seconds: int = 600
+    chart_max_points: int = 200
+    chart_timeout: float = 20.0  # total budget incl. retries; on timeout the chart is omitted
+
     # Request budget / politeness.
     max_pages: int = 12
     concurrency: int = 5

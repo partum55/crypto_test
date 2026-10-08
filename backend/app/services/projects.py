@@ -12,15 +12,19 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.config import Settings
-from app.schemas import FunnelStep, Meta, Project, ProjectsResponse
+from app.schemas import FunnelStep, Meta, Project, ProjectsResponse, StoredDetails
 from app.services.coingecko import CoinGeckoClient, CoinGeckoError
 from app.services.details_store import CoinDetails, DetailsStore, is_fresh
 from app.services.filters import (
     extract_tvl_usd,
+    fdv_below,
+    has_market_cap,
     is_preview_listing,
     passes_detail_filters,
     passes_market_filters,
+    supply_matches,
     tvl_above,
+    volume_above,
 )
 
 log = logging.getLogger(__name__)
@@ -39,6 +43,16 @@ class Snapshot:
     detail_errors: int
     fetched_at: datetime
     fetched_monotonic: float
+    rows: dict[str, dict[str, Any]]  # every scanned market row by id (detail endpoint allow-list)
+    details: dict[str, CoinDetails]  # stored details known at refresh time
+
+
+@dataclass
+class ProjectDetail:
+    project: Project
+    details: StoredDetails | None
+    passes: dict[str, bool]
+    fetched_at: datetime
 
 
 @dataclass
@@ -74,6 +88,40 @@ class ProjectService:
         snap = self._snapshot
         return snap is None or time.monotonic() - snap.fetched_monotonic >= self.s.cache_ttl_seconds
 
+    def _current_snapshot(self) -> Snapshot:
+        """The cached snapshot (triggering a background refresh if stale), or 503 if none yet."""
+        if self._is_stale():
+            self.start_refresh()
+        snap = self._snapshot
+        if snap is None:
+            reason = f" Last attempt failed: {self._last_error.message}" if self._last_error else ""
+            raise CoinGeckoError(503, f"Data is warming up, retry shortly.{reason}")
+        return snap
+
+    def get_detail(self, coin_id: str) -> ProjectDetail | None:
+        """Project + per-criterion results for any coin in the last market scan.
+
+        Only scanned ids are allowed, so the API can't be used to proxy arbitrary
+        CoinGecko lookups. Returns None for an unknown id (the route answers 404).
+        """
+        snap = self._current_snapshot()
+        row = snap.rows.get(coin_id)
+        if row is None:
+            return None
+        details = snap.details.get(coin_id)
+        return ProjectDetail(
+            project=to_project(row, details),
+            details=None
+            if details is None
+            else StoredDetails(
+                preview_listing=details.preview_listing,
+                tvl_usd=details.tvl_usd,
+                checked_at=details.checked_at,
+            ),
+            passes=criteria_results(row, details, self.s),
+            fetched_at=snap.fetched_at,
+        )
+
     async def get_projects(self, require_preview: bool = True) -> ProjectsResponse:
         """Never blocks on CoinGecko: serves the cached snapshot and refreshes in the background.
 
@@ -81,12 +129,7 @@ class ProjectService:
         no extra CoinGecko calls.
         """
         stale = self._is_stale()
-        if stale:
-            self.start_refresh()
-        snap = self._snapshot
-        if snap is None:
-            reason = f" Last attempt failed: {self._last_error.message}" if self._last_error else ""
-            raise CoinGeckoError(503, f"Data is warming up, retry shortly.{reason}")
+        snap = self._current_snapshot()
         items = select(snap.tvl_passing, require_preview, self.s)
         return ProjectsResponse(
             count=len(items),
@@ -188,6 +231,8 @@ class ProjectService:
             detail_errors=errors,
             fetched_at=datetime.now(UTC),
             fetched_monotonic=time.monotonic(),
+            rows={row["id"]: row for row in rows},
+            details=stored,
         )
 
 
@@ -251,7 +296,22 @@ def build_funnel(
     ]
 
 
-def to_project(row: dict[str, Any], details: CoinDetails) -> Project:
+def criteria_results(
+    row: dict[str, Any], details: CoinDetails | None, s: Settings
+) -> dict[str, bool]:
+    """Pass/fail per criterion. Unknown details (never checked) count as fail."""
+    tvl = details.tvl_usd if details else None
+    return {
+        "market_cap": has_market_cap(row),
+        "fdv": fdv_below(row, s.fdv_max),
+        "volume": volume_above(row, s.volume_min),
+        "supply": supply_matches(row, s.supply_rel_tol),
+        "tvl": tvl_above(tvl, s.tvl_min),
+        "preview_listing": bool(details and details.preview_listing),
+    }
+
+
+def to_project(row: dict[str, Any], details: CoinDetails | None) -> Project:
     return Project(
         id=row["id"],
         symbol=row["symbol"],
@@ -259,11 +319,11 @@ def to_project(row: dict[str, Any], details: CoinDetails) -> Project:
         image=row.get("image"),
         coingecko_url=f"https://www.coingecko.com/en/coins/{row['id']}",
         current_price=row.get("current_price"),
-        market_cap=row["market_cap"],
-        fully_diluted_valuation=row["fully_diluted_valuation"],
-        total_volume=row["total_volume"],
-        total_supply=row["total_supply"],
-        max_supply=row["max_supply"],
-        total_value_locked=details.tvl_usd,
-        preview_listing=details.preview_listing,
+        market_cap=row.get("market_cap"),
+        fully_diluted_valuation=row.get("fully_diluted_valuation"),
+        total_volume=row.get("total_volume"),
+        total_supply=row.get("total_supply"),
+        max_supply=row.get("max_supply"),
+        total_value_locked=details.tvl_usd if details else None,
+        preview_listing=details.preview_listing if details else None,
     )
