@@ -10,14 +10,11 @@ const button =
 /** Small status line next to the title. Colour follows meaning: amber in progress, red failure. */
 export function StatusPill({ phase, meta }: { phase: Phase; meta: Meta | null }) {
   const fetchedAt = meta?.fetched_at;
-  const progress = meta?.progress;
   const text: Record<Phase, string> = {
     loading: "Connecting to backend",
     warming: "Warming up",
     scanning: "Scanning",
-    refreshing: progress
-      ? `Refreshing, ${formatCount(progress.checked)} of ${formatCount(progress.total)} checked`
-      : "Refreshing",
+    refreshing: "Refreshing",
     stale: `Data may be outdated, from ${formatTime(fetchedAt)}`,
     live: `Updated ${formatTime(fetchedAt)}`,
     error: "Not updating",
@@ -81,7 +78,7 @@ export default function StatusBanner({ phase, error, fetchedAt, requirePreview, 
 
 /** The backend's final answer was 0 projects: show the funnel path and where it hit zero. */
 export function EmptyFromBackend({ meta, toggle }: { meta: Meta; toggle: ReactNode }) {
-  const requirePreview = meta.require_preview ?? true;
+  const requirePreview = meta.require_preview;
   const steps = activeSteps(meta.funnel, requirePreview);
   const cut = bottleneck(steps);
 

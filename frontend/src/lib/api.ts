@@ -1,4 +1,3 @@
-import { normalizeCoin } from "@/lib/coin";
 import type { CoinDetail, ProjectsResponse } from "@/lib/types";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -53,9 +52,9 @@ export async function fetchProjects(signal: AbortSignal, requirePreview = true):
 
 /** One coin with its rule checks and a price chart over `days`. 404 = not in the current scan. */
 export async function fetchCoin(id: string, days: number, signal: AbortSignal): Promise<CoinDetail> {
-  const detail = normalizeCoin(
-    (await getJson(`/api/projects/${encodeURIComponent(id)}?days=${days}`, signal)) as Parameters<typeof normalizeCoin>[0],
-  );
-  if (!detail) throw new ApiError("Backend sent an unexpected response.");
-  return detail;
+  const body = (await getJson(`/api/projects/${encodeURIComponent(id)}?days=${days}`, signal)) as CoinDetail;
+  if (!body?.project || !Array.isArray(body.passes)) {
+    throw new ApiError("Backend sent an unexpected response.");
+  }
+  return body;
 }

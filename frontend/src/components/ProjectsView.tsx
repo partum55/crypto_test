@@ -102,7 +102,7 @@ export default function ProjectsView() {
     empty = <p className="text-muted">No data yet. Projects appear here once the backend responds.</p>;
   else if (settled && items.length === 0) empty = (
       <EmptyFromBackend
-        meta={{ ...data.meta, require_preview: requirePreview }}
+        meta={data.meta}
         toggle={<PreviewToggle id="preview-empty" requirePreview={requirePreview} onChange={changeRequirePreview} />}
       />
     );

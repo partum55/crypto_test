@@ -75,16 +75,16 @@ Details, features and design decisions are in [`frontend/NOTES.md`](frontend/NOT
     "require_preview": true,
     "funnel": [
       {"key": "scanned", "label": "Scanned on CoinGecko markets", "passed": 2747},
-      {"key": "market_filters", "label": "Market cap > 0, FDV < $100M, 24h volume > $50k, max supply = total supply", "passed": 685},
+      {"key": "market_filters", "label": "Market cap > 0, FDV < $100M, 24h volume > $50k, Max supply = total supply", "passed": 685},
       {"key": "tvl", "label": "TVL > $50k", "passed": 107},
-      {"key": "preview_listing", "label": "preview_listing = true", "passed": 1}
+      {"key": "preview_listing", "label": "On CoinGecko's preview listing", "passed": 1}
     ]
   }
 }
 ```
 
 - `meta` explains the result. It reports how many coins were scanned and how many survived the cheap filters (`after_prefilter`). Among those, it reports how many are preview-listed (`preview_listed`) and how many have TVL above $50k (`tvl_above_min`); `after_details` is how many pass both. `details_fetched` is the number of `/coins/{id}` calls made by the last refresh. **An empty `items` list is a valid result**, not an error.
-- `meta.funnel` lists the pipeline steps in order. Each `passed` is the cumulative number of coins still in after that step: scanned → market filters → TVL → preview_listing. Labels are built from the configured thresholds. The funnel is the same for both values of `require_preview`.
+- `meta.funnel` lists the pipeline steps in order. Each `passed` is the cumulative number of coins still in after that step: scanned → market filters → TVL → preview_listing. Labels are built from the configured thresholds by `rule_labels` (the same source as the detail `passes` labels), so clients never hardcode them. The funnel is the same for both values of `require_preview`.
 - `require_preview` (default `true`): see the deviation note under "Why the strict result is 0". The value is echoed in `meta.require_preview`. `meta.after_details` always reports the strict (all six criteria) count.
 - `503`: the cache is still warming up, or CoinGecko kept rate-limiting after retries. The response has a `detail` message and `Retry-After`.
 - `502`: CoinGecko was unreachable or returned an unexpected error.
@@ -98,10 +98,17 @@ Details for one coin. `days` must be `1`, `7` (default) or `30`; anything else r
 {
   "project": { "id": "dodo", "symbol": "dodo", "name": "DODO", "...": "same fields as list items" },
   "details": { "preview_listing": false, "tvl_usd": 12469538.0, "checked_at": "2026-10-08T19:55:16Z" },
-  "passes": { "market_cap": true, "fdv": true, "volume": true, "supply": true,
-              "tvl": true, "preview_listing": false },
-  "chart": { "days": 7, "prices": [[1790888400000, 0.0184]], "volumes": [[1790888400000, 16709522.9]] },
-  "meta": { "fetched_at": "2026-10-08T20:17:07Z", "chart_cached": false, "chart_error": null }
+  "passes": [
+    {"key": "market_cap", "label": "Market cap > 0", "passed": true},
+    {"key": "fdv", "label": "FDV < $100M", "passed": true},
+    {"key": "volume", "label": "24h volume > $50k", "passed": true},
+    {"key": "supply", "label": "Max supply = total supply", "passed": true},
+    {"key": "tvl", "label": "TVL > $50k", "passed": true},
+    {"key": "preview_listing", "label": "On CoinGecko's preview listing", "passed": false}
+  ],
+  "chart": { "days": 7, "prices": [[1790888400000, 0.0184]], "total_volumes": [[1790888400000, 16709522.9]] },
+  "chart_error": null,
+  "meta": { "fetched_at": "2026-10-08T20:17:07Z", "chart_cached": false }
 }
 ```
 
@@ -109,12 +116,13 @@ Details for one coin. `days` must be `1`, `7` (default) or `30`; anything else r
 - **Data sources:**
   - `project` comes from the cached market scan and is never re-fetched for this endpoint. The fields share the list schema, but they can be `null` here, because any scanned coin is allowed, not only coins that passed.
   - `details` is the stored SQLite row. It is `null` if the coin was never checked via `/coins/{id}`, which happens when it failed the market filters.
-- **`passes`** gives every criterion's result, so the UI can show which rules a coin fails. A null or unknown value counts as a fail. Keys: `market_cap`, `fdv`, `volume`, `supply`, `tvl`, `preview_listing`.
+- **`passes`** lists all six criteria in pipeline order as `{key, label, passed}`, so the UI can show which rules a coin fails. A null or unknown value counts as a fail. `key` is a closed set (`RuleKey`: `market_cap`, `fdv`, `volume`, `supply`, `tvl`, `preview_listing`); labels come from the configured thresholds.
+- **Typed on both sides:** `backend/app/schemas.py` and `frontend/src/lib/types.ts` define the same models field for field; change them together.
 - **`chart`** comes from `/coins/{id}/market_chart?vs_currency=usd&days=N`:
   - It goes through the shared rate limiter and retries. It skips the background concurrency queue, so it never waits behind a detail refresh.
   - It is cached in memory per `(id, days)` for 10 min (`CHART_CACHE_TTL_SECONDS`).
-  - It is downsampled to at most 200 points by keeping every k-th point plus the last one. The raw sizes are 288, 168 and 720 points for 1, 7 and 30 days.
-- **Chart errors:** if the chart call fails or exceeds `CHART_TIMEOUT` (20s), the response is still `200`, with `chart: null` and `meta.chart_error` holding CoinGecko's error. Failures are not cached.
+  - Points with a `null` value are dropped, then the series is downsampled to at most 200 points by keeping every k-th point plus the last one. The raw sizes are 288, 168 and 720 points for 1, 7 and 30 days.
+- **Chart errors:** if the chart call fails or exceeds `CHART_TIMEOUT` (20s), the response is still `200`, with `chart: null` and `chart_error` holding CoinGecko's error. Failures are not cached.
 
 ## How it works
 

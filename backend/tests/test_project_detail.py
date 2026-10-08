@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import app
-from app.services.charts import ChartService, downsample
+from app.services.charts import ChartService, downsample, drop_nulls
 from app.services.coingecko import CoinGeckoError
 from app.services.details_store import DetailsStore
 from app.services.projects import ProjectService
@@ -58,30 +58,36 @@ def test_bad_days_is_422(api, days):
     assert client.get(f"/api/projects/match?days={days}").status_code == 422
 
 
-def test_passes_map_and_payload(api):
+def passed(body):
+    return {r["key"]: r["passed"] for r in body["passes"]}
+
+
+def test_passes_list_and_payload(api):
     client, _ = api()
     body = client.get("/api/projects/match").json()
-    assert body["passes"] == {
-        "market_cap": True,
-        "fdv": True,
-        "volume": True,
-        "supply": True,
-        "tvl": True,
-        "preview_listing": True,
-    }
+    assert [r["key"] for r in body["passes"]] == [
+        "market_cap",
+        "fdv",
+        "volume",
+        "supply",
+        "tvl",
+        "preview_listing",
+    ]
+    assert all(r["passed"] for r in body["passes"])
+    assert body["passes"][1]["label"] == "FDV < $100M"  # from settings, not a literal
     assert body["project"]["id"] == "match"
     assert body["details"]["preview_listing"] is True
     assert body["details"]["tvl_usd"] == 75_000
     assert body["chart"]["days"] == 7  # default
 
-    no_preview = client.get("/api/projects/no-preview").json()["passes"]
+    no_preview = passed(client.get("/api/projects/no-preview").json())
     assert no_preview["tvl"] is True and no_preview["preview_listing"] is False
 
     # Scanned but failed the market filters: never checked via /coins/{id}.
     big = client.get("/api/projects/big").json()
     assert big["details"] is None
     assert big["project"]["preview_listing"] is None
-    assert big["passes"] == {
+    assert passed(big) == {
         "market_cap": True,
         "fdv": False,
         "volume": True,
@@ -110,8 +116,8 @@ def test_chart_failure_still_returns_project(api):
     assert response.status_code == 200
     body = response.json()
     assert body["chart"] is None
-    assert "500" in body["meta"]["chart_error"]
-    assert body["passes"]["preview_listing"] is True
+    assert "500" in body["chart_error"]
+    assert passed(body)["preview_listing"] is True
     client.get("/api/projects/match")
     assert len(fake.chart_calls) == 2  # failures are not cached
 
@@ -123,3 +129,7 @@ def test_downsample():
     assert sampled[0] == points[0] and sampled[-1] == points[-1]
     short = points[:168]
     assert downsample(short, 200) is short
+
+
+def test_drop_nulls():
+    assert drop_nulls([[1, 2.5], [2, None], [3, 4]]) == [(1, 2.5), (3, 4.0)]

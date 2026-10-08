@@ -4,7 +4,14 @@ from datetime import UTC, datetime, timedelta
 
 from app.config import Settings
 from app.services.details_store import CoinDetails, DetailsStore, is_fresh
-from app.services.projects import build_funnel, combine, select, usd_short
+from app.services.projects import (
+    MARKET_RULES,
+    build_funnel,
+    combine,
+    rule_labels,
+    select,
+    usd_short,
+)
 
 S = Settings(_env_file=None)
 NOW = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
@@ -99,3 +106,7 @@ def test_funnel_labels_follow_config():
     ]
     assert "FDV < $25M" in funnel[1].label and "24h volume > $10k" in funnel[1].label
     assert funnel[2].label == "TVL > $1M"
+    # Funnel and detail `passes` share one label source.
+    labels = rule_labels(s)
+    assert funnel[1].label == ", ".join(labels[k] for k in MARKET_RULES)
+    assert funnel[3].label == labels["preview_listing"]

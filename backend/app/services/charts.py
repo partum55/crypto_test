@@ -10,6 +10,11 @@ from app.services.cache import TTLCache
 from app.services.coingecko import CoinGeckoClient, CoinGeckoError
 
 
+def drop_nulls(points: list[Any]) -> list[tuple[int, float]]:
+    """CoinGecko occasionally sends [ts, null]; the chart contract has numbers only."""
+    return [(int(t), float(v)) for t, v in points if v is not None]
+
+
 def downsample(points: list[Any], max_points: int) -> list[Any]:
     """Keep every k-th point (k chosen so at most max_points remain), always keeping the last."""
     if len(points) <= max_points:
@@ -42,8 +47,10 @@ class ChartService:
             return None, False, f"CoinGecko chart request timed out after {self.s.chart_timeout}s"
         chart = Chart(
             days=days,
-            prices=downsample(raw.get("prices") or [], self.s.chart_max_points),
-            volumes=downsample(raw.get("total_volumes") or [], self.s.chart_max_points),
+            prices=downsample(drop_nulls(raw.get("prices") or []), self.s.chart_max_points),
+            total_volumes=downsample(
+                drop_nulls(raw.get("total_volumes") or []), self.s.chart_max_points
+            ),
         )
         self._cache.set((coin_id, days), chart)
         return chart, False, None

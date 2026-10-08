@@ -12,7 +12,15 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.config import Settings
-from app.schemas import FunnelStep, Meta, Project, ProjectsResponse, StoredDetails
+from app.schemas import (
+    FunnelStep,
+    Meta,
+    Project,
+    ProjectsResponse,
+    RuleCheck,
+    RuleKey,
+    StoredDetails,
+)
 from app.services.coingecko import CoinGeckoClient, CoinGeckoError
 from app.services.details_store import CoinDetails, DetailsStore, is_fresh
 from app.services.filters import (
@@ -51,7 +59,7 @@ class Snapshot:
 class ProjectDetail:
     project: Project
     details: StoredDetails | None
-    passes: dict[str, bool]
+    passes: list[RuleCheck]
     fetched_at: datetime
 
 
@@ -277,31 +285,47 @@ def usd_short(value: float) -> str:
     return f"${value:g}"
 
 
+MARKET_RULES: tuple[RuleKey, ...] = ("market_cap", "fdv", "volume", "supply")
+
+
+def rule_labels(s: Settings) -> dict[RuleKey, str]:
+    """The one place criterion labels are written; thresholds come from settings.
+
+    Used by both the funnel and the detail `passes`, so the UI never hardcodes them.
+    """
+    return {
+        "market_cap": "Market cap > 0",
+        "fdv": f"FDV < {usd_short(s.fdv_max)}",
+        "volume": f"24h volume > {usd_short(s.volume_min)}",
+        "supply": "Max supply = total supply",
+        "tvl": f"TVL > {usd_short(s.tvl_min)}",
+        "preview_listing": "On CoinGecko's preview listing",
+    }
+
+
 def build_funnel(
     s: Settings, scanned: int, market: int, tvl: int, preview: int
 ) -> list[FunnelStep]:
     """Cumulative counts in pipeline order; labels follow the configured thresholds."""
+    labels = rule_labels(s)
     return [
         FunnelStep(key="scanned", label="Scanned on CoinGecko markets", passed=scanned),
         FunnelStep(
             key="market_filters",
-            label=(
-                f"Market cap > 0, FDV < {usd_short(s.fdv_max)}, "
-                f"24h volume > {usd_short(s.volume_min)}, max supply = total supply"
-            ),
+            label=", ".join(labels[k] for k in MARKET_RULES),
             passed=market,
         ),
-        FunnelStep(key="tvl", label=f"TVL > {usd_short(s.tvl_min)}", passed=tvl),
-        FunnelStep(key="preview_listing", label="preview_listing = true", passed=preview),
+        FunnelStep(key="tvl", label=labels["tvl"], passed=tvl),
+        FunnelStep(key="preview_listing", label=labels["preview_listing"], passed=preview),
     ]
 
 
 def criteria_results(
     row: dict[str, Any], details: CoinDetails | None, s: Settings
-) -> dict[str, bool]:
-    """Pass/fail per criterion. Unknown details (never checked) count as fail."""
+) -> list[RuleCheck]:
+    """Pass/fail per criterion, in pipeline order. Unknown details (never checked) count as fail."""
     tvl = details.tvl_usd if details else None
-    return {
+    results: dict[RuleKey, bool] = {
         "market_cap": has_market_cap(row),
         "fdv": fdv_below(row, s.fdv_max),
         "volume": volume_above(row, s.volume_min),
@@ -309,6 +333,8 @@ def criteria_results(
         "tvl": tvl_above(tvl, s.tvl_min),
         "preview_listing": bool(details and details.preview_listing),
     }
+    labels = rule_labels(s)
+    return [RuleCheck(key=k, label=labels[k], passed=ok) for k, ok in results.items()]
 
 
 def to_project(row: dict[str, Any], details: CoinDetails | None) -> Project:

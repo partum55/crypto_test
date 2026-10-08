@@ -13,11 +13,9 @@ export function getPhase(data: ProjectsResponse | null, error: { warming: boolea
   return data.meta.stale ? "stale" : "live";
 }
 
-export const PREVIEW_KEY = "preview_listing";
-
 /** Funnel steps that apply: the preview_listing step is dropped when that rule is ignored. */
-export function activeSteps(funnel: FunnelStep[] | undefined, requirePreview: boolean): FunnelStep[] {
-  return (funnel ?? []).filter((s) => requirePreview || s.key !== PREVIEW_KEY);
+export function activeSteps(funnel: FunnelStep[], requirePreview: boolean): FunnelStep[] {
+  return funnel.filter((s) => requirePreview || s.key !== "preview_listing");
 }
 
 /** The first step that leaves 0 coins, with the step before it (what reached it). */

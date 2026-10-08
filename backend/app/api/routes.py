@@ -42,7 +42,7 @@ async def project_detail(
     """One scanned coin: cached market data, stored details, per-criterion results, chart.
 
     Only ids from the current market scan are accepted (404 otherwise). If the chart can't
-    be loaded, the rest is still returned with `chart: null` and `meta.chart_error`.
+    be loaded, the rest is still returned with `chart: null` and `chart_error`.
     """
     try:
         detail = request.app.state.projects.get_detail(coin_id)
@@ -57,7 +57,6 @@ async def project_detail(
         details=detail.details,
         passes=detail.passes,
         chart=chart,
-        meta=ProjectDetailMeta(
-            fetched_at=detail.fetched_at, chart_cached=chart_cached, chart_error=chart_error
-        ),
+        chart_error=chart_error,
+        meta=ProjectDetailMeta(fetched_at=detail.fetched_at, chart_cached=chart_cached),
     )

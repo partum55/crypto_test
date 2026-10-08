@@ -1,5 +1,6 @@
 from datetime import datetime
 from enum import IntEnum
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -22,10 +23,21 @@ class Project(BaseModel):
     preview_listing: bool | None  # null = details never checked (coin failed market filters)
 
 
+# The six criteria, in pipeline order. Mirrored as `RuleKey` in frontend/src/lib/types.ts.
+RuleKey = Literal["market_cap", "fdv", "volume", "supply", "tvl", "preview_listing"]
+FunnelKey = Literal["scanned", "market_filters", "tvl", "preview_listing"]
+
+
 class FunnelStep(BaseModel):
-    key: str
-    label: str
+    key: FunnelKey
+    label: str  # built from the configured thresholds (see projects.rule_labels)
     passed: int  # coins remaining after this step (cumulative)
+
+
+class RuleCheck(BaseModel):
+    key: RuleKey
+    label: str  # built from the configured thresholds (see projects.rule_labels)
+    passed: bool
 
 
 class Meta(BaseModel):
@@ -66,19 +78,19 @@ class StoredDetails(BaseModel):
 
 class Chart(BaseModel):
     days: int
-    prices: list[tuple[int, float | None]]  # [ts_ms, usd]
-    volumes: list[tuple[int, float | None]]  # [ts_ms, usd 24h volume]
+    prices: list[tuple[int, float]]  # [ts_ms, usd]; points with a null value are dropped
+    total_volumes: list[tuple[int, float]]  # [ts_ms, usd 24h volume]; same
 
 
 class ProjectDetailMeta(BaseModel):
     fetched_at: datetime  # market snapshot the project/passes come from
     chart_cached: bool
-    chart_error: str | None  # set when the chart couldn't be loaded (chart is then null)
 
 
 class ProjectDetailResponse(BaseModel):
     project: Project
     details: StoredDetails | None  # null if this coin was never checked via /coins/{id}
-    passes: dict[str, bool]  # market_cap, fdv, volume, supply, tvl, preview_listing
+    passes: list[RuleCheck]  # all six criteria, in pipeline order
     chart: Chart | None
+    chart_error: str | None  # set when the chart couldn't be loaded (chart is then null)
     meta: ProjectDetailMeta

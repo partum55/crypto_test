@@ -55,13 +55,13 @@ Checks: `npm run lint`, `npm test` (pure functions in `src/lib`, `node:test`, no
 
 ## Why the strict result is 0
 
-On the live data: 2,747 coins scanned → 685 pass the market filters → 107 have TVL > $50k → **0** have `preview_listing = true`.
+On the live data: 2,747 coins scanned → 685 pass the market filters → 107 have TVL > $50k → **0** are on CoinGecko's preview listing.
 
 Preview listings on CoinGecko are pre-launch tokens: they aren't trading yet, so they have no real 24h volume, and usually no TVL or a full supply either. The spec asks for a preview-listed coin that *also* has volume > $50k and TVL > $50k, and these conditions almost never hold together. An empty list is therefore the expected, correct answer, not a bug. The UI says this and shows the funnel step where the count drops to 0. The toggle lets a reviewer see the 107 coins that pass the other five rules, clearly labelled as a deviation.
 
 ## Design decisions
 
-- **Direction: "the screen is the explanation."** The funnel at the top is the one prominent element and stays in every state. During warm-up it shows skeleton bars or scan progress, for an empty result it shows where coins drop out, and with data it puts the short list in context. Bar length is linear in the count (relative to coins scanned) so the bars stay honest; zero is drawn as a baseline tick, not a missing bar.
+- **Direction: "the screen is the explanation."** The funnel at the top is the one prominent element and stays in every state. During warm-up it shows skeleton bars, for an empty result it shows where coins drop out, and with data it puts the short list in context. Bar length is linear in the count (relative to coins scanned) so the bars stay honest; zero is drawn as a baseline tick, not a missing bar.
 - **Labelled toolbar instead of the sentence-style controls.** A sentence made of inputs and selects depends on inline wrapping of controls whose widths vary by font, value and viewport. It broke with a lone "," and orphaned selects. A labelled grid (search / max FDV / sort, then the toggle) is predictable, scans faster and stacks cleanly at 375 px.
 - **Colour carries meaning only.**
   - ink `#16213A`: text and bars
@@ -70,16 +70,16 @@ Preview listings on CoinGecko are pre-launch tokens: they aren't trading yet, so
   - rule `#C6CFDB`: dividers and skeletons
   - line `#7A8699`: input borders, ≥ 3:1
   - accent `#1F5F8B`: focus, active sort
-  - signal `#8A5A00` (dot `#E0A100`): warming, refreshing, progress
+  - signal `#8A5A00` (dot `#E0A100`): warming, refreshing
   - error `#B3261E`: real failures only
 
   All text pairs are ≥ 5.2:1 (WCAG AA).
 - **Type:** Public Sans via `next/font` (self-hosted at build). I switched from Schibsted Grotesk because its tabular figures also make commas and periods fixed-width ("2 , 750"). Scale: 12/14/16/20/28–36. Numbers are right-aligned with `tabular-nums`.
-- **Motion:** only the status dot pulses and the progress bar animates. Both are disabled under `prefers-reduced-motion`. Skeletons are static.
+- **Motion:** only the status dot pulses. It is disabled under `prefers-reduced-motion`. Skeletons are static.
 - **States:**
   - **Loading:** "Connecting to backend". Skeleton funnel, plus table header with 5 skeleton rows, so nothing jumps when data arrives. Controls are disabled.
   - **Warming** (503 whose `detail` contains "warming"): amber "Warming up" and a neutral note. No red and no Retry; it auto-retries every 5 s.
-  - **Scanning** (200 + `refreshing` + 0 items): the empty verdict is held back, and the last funnel step shows `meta.progress` ("Checked 340 of 692 candidates").
+  - **Scanning** (200 + `refreshing` + 0 items): the empty verdict is held back, and the last funnel step stays a placeholder until the scan finishes.
   - **Refreshing** (data + `refreshing`): table stays; status reads "Refreshing, 120 of 692 checked".
   - **Error** (unreachable, timeout, 502, non-warming 503): red block with the message and **Retry**, and status "Not updating". Earlier data stays visible with "Showing data from HH:MM". With no data, the table says so instead of showing skeletons that would look like loading.
   - **Empty from backend:** the steps from `meta.funnel` with the zero step in bold, a sentence naming where the count hit 0 and why, and the toggle.
@@ -91,34 +91,22 @@ Preview listings on CoinGecko are pre-launch tokens: they aren't trading yet, so
 
 - **Filtering/sorting on the client.** The backend owns the required criteria (and the preview toggle, since it needs data the client doesn't have). The UI owns user-driven refinements on a short list (`useMemo` over pure functions in `src/lib/query.ts`), so there are no extra round-trips.
 - **Polling.** One `useEffect` loop per mount, retry or toggle change. It re-fetches every 5 s while `meta.refreshing` is true or while warming. The cleanup aborts the request and clears the timer, so React StrictMode's double mount leaves one loop.
-- Numbers are typed `number | null` and render as "—". `stale`, `refreshing`, `cached`, `progress`, `funnel` and `require_preview` are optional. Without `funnel`, the UI falls back to `scanned` / `after_prefilter` / `after_details`.
+- Numbers are typed `number | null` exactly where the backend allows null (detail pages serve any scanned coin) and render as "—".
 - Time (`fetched_at`) is only rendered after the client fetch, so there's no hydration mismatch.
 
-## Contract notes for the backend
+## API contract
 
-- `meta.funnel` is consumed as an ordered array `[{key, label, passed}]`, with `passed` cumulative. Labels are shown verbatim. `preview_listing = true` reads technical; a label such as "On CoinGecko's preview listing" would read better.
-- `meta.progress: {checked, total}` is optional and rendered when present. The backend doesn't send it yet.
-- A 503 is treated as warm-up only when `detail` contains "warming". Other 503s are real errors with Retry.
-- `meta.cached` is not sent. Extra fields (`coingecko_url`, `detail_errors`, `age_seconds`, `last_error`, `preview_listed`, `tvl_above_min`, …) are ignored.
+`src/lib/types.ts` mirrors `backend/app/schemas.py` field for field: `Project`, `Meta`, `FunnelStep`, `RuleCheck`, `ProjectsResponse`, `StoredDetails`, `PriceChart`, `CoinDetail`. The key sets are literal unions on both sides (`RuleKey`, `FunnelKey`). There is no adapter: the frontend reads the response as typed. Change both files together.
 
-### Coin detail: what we agreed vs. what the backend ships
-
-The agreed shape (in `lib/types.ts`):
-`{ project, passes: [{key, label, passed}], chart: {days, prices, total_volumes} | null, chart_error }`, with 404 → `{detail}`.
-
-The real `GET /api/projects/{id}` (backend commit `bbeeefa`) differs:
-
-| Agreed | Shipped |
-|---|---|
-| `passes` as an ordered array with labels | `passes` as an object `{market_cap, fdv, volume, supply, tvl, preview_listing: bool}`, without labels |
-| `chart.total_volumes` | `chart.volumes` |
-| top-level `chart_error` | `meta.chart_error` |
-| — | `null` values inside `prices` / `volumes` |
-| — | extra `details` and `meta.chart_cached` (ignored) |
-
-The 404 matches: `{"detail": "Unknown coin id '…' (not in the current market scan)"}`.
-
-I did not change the backend. `src/lib/coin.ts` (`normalizeCoin`, tested) accepts both shapes and drops null points. For the object form, the frontend supplies the six rule labels. Once the backend settles on one shape, the other branch can go.
+- **Labels:** every rule and funnel label is built once in the backend (`rule_labels` in `services/projects.py`) from the threshold settings. The frontend never writes a threshold such as `$100M` itself; the funnel skeleton has no text until data arrives.
+- **List:** `GET /api/projects[?require_preview=false]` → `{count, items, meta}`. `meta.funnel` holds the cumulative steps scanned → market filters → TVL → preview listing, and `meta.require_preview` echoes the query.
+- **Detail:** `GET /api/projects/{id}?days=1|7|30` → `{project, details, passes, chart, chart_error, meta: {fetched_at, chart_cached}}`.
+  - `passes` lists all six `RuleCheck`s in pipeline order.
+  - `chart` is `{days, prices, total_volumes}`; the backend drops `[ts, null]` points.
+  - `chart: null` comes with `chart_error`.
+  - An unknown id → 404 `{detail}`.
+- **Warm-up:** a 503 counts as warm-up only when `detail` contains "warming"; other 503s are real errors with Retry.
+- **Fixing the earlier mismatch:** the first detail endpoint sent `passes` as an object without labels, `chart.volumes`, `meta.chart_error`, and null points. The backend now sends the shape above, and the frontend adapter (`coin.ts`) and its label map are deleted.
 
 ## Limitations
 
@@ -137,15 +125,16 @@ I did not change the backend. `src/lib/coin.ts` (`normalizeCoin`, tested) accept
 - **Generated:**
   - v1: scaffold, `lib/`, components.
   - v2 (this redesign): design proposal, Funnel, toolbar, phase logic, preview toggle, NOTES.
-  - v3: coin page (route, `CoinDetail`, `PriceChart`, `chart.ts`), list state in the URL (`listState.ts`), row links, response adapter (`coin.ts`).
+  - v3: coin page (route, `CoinDetail`, `PriceChart`, `chart.ts`), list state in the URL (`listState.ts`), row links.
+  - v4: one typed contract on both sides (backend schemas plus `types.ts`), labels only from the backend, adapter removed.
   - All written with Claude Code.
 - **Verified:**
-  - lint, `npm run build`, and `npm test` with 12 tests:
+  - lint, `npm run build`, and `npm test` with 10 tests:
     - search, FDV strict `<` and shorthand, sort;
     - phases, funnel bottleneck;
     - URL state round-trip;
-    - chart geometry, nearest point;
-    - both detail response shapes.
+    - chart geometry, nearest point.
+  - Backend: `uv run pytest` passes 43 tests and ruff is clean, including the `passes` list, top-level `chart_error`, labels following settings, and null-point dropping.
   - A Playwright script outside the repo (mocks live only there) took screenshots at 1280 and 375 px of: loading, warming, scanning + progress, refreshing + progress, error unreachable, 502 with earlier data, empty from backend with funnel, empty without funnel, toggle on, empty after filters, data + header-click sort, keyboard focus. I looked at each one. The page never scrolls sideways at 375 px.
   - Against the live backend: strict result 0 with the real funnel, the toggle requests `?require_preview=false` and shows 107 rows, and requests go only to `localhost:8000` (plus the logo CDN).
   - Coin page against the live backend (`origin-protocol`, reached via the list with `preview=ignore`), at 1280 and 375 px:

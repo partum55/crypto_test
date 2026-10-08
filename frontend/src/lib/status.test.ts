@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { ProjectsResponse } from "./types.ts";
+import type { FunnelStep, ProjectsResponse } from "./types.ts";
 import { activeSteps, bottleneck, getPhase } from "./status.ts";
 
 const res = (n: number, meta: Partial<ProjectsResponse["meta"]> = {}) =>
@@ -22,7 +22,7 @@ test("phase: empty while refreshing is a scan in progress, not a final empty res
   assert.equal(getPhase(res(0), null), "live");
 });
 
-const FUNNEL = [
+const FUNNEL: FunnelStep[] = [
   { key: "scanned", label: "Scanned", passed: 2747 },
   { key: "market_filters", label: "Market", passed: 691 },
   { key: "tvl", label: "TVL", passed: 108 },
@@ -33,5 +33,5 @@ test("bottleneck: first step that drops to 0, honouring the preview toggle", () 
   assert.deepEqual(bottleneck(activeSteps(FUNNEL, true)), { before: FUNNEL[2], step: FUNNEL[3] });
   assert.equal(activeSteps(FUNNEL, false).length, 3);
   assert.equal(bottleneck(activeSteps(FUNNEL, false)), null);
-  assert.equal(bottleneck(activeSteps(undefined, true)), null);
+  assert.equal(bottleneck(activeSteps([], true)), null);
 });
