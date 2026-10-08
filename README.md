@@ -1,24 +1,27 @@
 # Crypto Projects Filter
 
-A FastAPI backend that scans CoinGecko and returns the coins matching **all** of these criteria:
+A FastAPI backend that scans CoinGecko for coins matching **all six** criteria below, and a Next.js frontend that lists them. The browser talks only to our backend, never to CoinGecko.
 
-| Criterion | Source | Rule |
+| Criterion | CoinGecko source | Rule |
 |---|---|---|
 | Market cap > 0 | `/coins/markets` `market_cap` | strict `>` |
 | FDV < $100M | `/coins/markets` `fully_diluted_valuation` | strict `<` |
 | 24h volume > $50k | `/coins/markets` `total_volume` | strict `>` |
-| Max supply == total supply | `/coins/markets` `max_supply`, `total_supply` | `math.isclose(rel_tol=1e-6)` |
-| `preview_listing == true` | `/coins/{id}` top-level `preview_listing` | `is True` |
+| Max supply = total supply | `/coins/markets` `max_supply`, `total_supply` | `math.isclose(rel_tol=1e-6)` |
+| On the preview listing | `/coins/{id}` top-level `preview_listing` | `is True` |
 | TVL > $50k | `/coins/{id}` `market_data.total_value_locked` | strict `>` (USD) |
 
-The Next.js frontend (`frontend/`) calls only this backend, never CoinGecko directly.
+> **Heads-up:** with live data the strict result is **0 coins**. That's expected, not a bug; see [Why the strict result is 0](#why-the-strict-result-is-0).
 
-## Run the backend
+## How to run
 
-> **You need a free CoinGecko Demo API key** ([get one here](https://www.coingecko.com/en/api/pricing)).
-> Without a key, CoinGecko rate-limits by IP after a handful of calls, and a full scan needs about 700 calls.
+### Prerequisites
 
-Requires [uv](https://docs.astral.sh/uv/). uv installs Python 3.12 automatically (pinned in `.python-version`).
+- [uv](https://docs.astral.sh/uv/). It installs Python 3.12 automatically (pinned in `backend/.python-version`).
+- Node.js **22.18+** (Next.js needs 20.9+; `npm test` uses Node's built-in TypeScript stripping). Developed on Node 24.
+- A free **CoinGecko Demo API key** ([get one here](https://www.coingecko.com/en/api/pricing)). Without a key, CoinGecko rate-limits after a handful of calls, and a full scan needs about 700.
+
+### Backend (port 8000)
 
 ```bash
 cd backend
@@ -30,73 +33,176 @@ uv run uvicorn app.main:app --reload --port 8000
 - API: <http://localhost:8000/api/projects>
 - Swagger docs: <http://localhost:8000/docs>
 - Health: <http://localhost:8000/health>
-- Tests and lint: `uv run pytest` and `uv run ruff check .`
 
-On startup the server **warms its cache in the background**. Until that first refresh finishes, `/api/projects` answers `503` with `Retry-After: 30`.
+On startup the server **warms its cache in the background**. Until the first scan finishes, `/api/projects` answers `503` with `Retry-After: 30`; the frontend shows this as "Warming up" and retries by itself.
 
 | Start | What happens | Measured (Demo key) |
 |---|---|---|
 | First ever (empty DB) | 11 market pages + ~690 `/coins/{id}` calls | **~471 s** (about 8 min) |
-| Restart / later refreshes (details < 6h old) | 11 market pages + only new or stale coins | **~10 s** (9.7 s measured; 4 detail calls) |
+| Restart / later refreshes | 11 market pages + only new or stale coins | **~10 s** |
 
-Coin details are stored in `backend/data/coins.db` (SQLite, gitignored). Delete that file to force a full re-check.
+Coin details are stored in `backend/data/coins.db` (SQLite, gitignored). Delete it to force a full re-check. All settings (thresholds, TTLs, rate limits) are in `backend/.env.example`.
 
-## Run the frontend
+### Frontend (port 3000)
 
 ```bash
 cd frontend
+cp .env.example .env.local    # optional; NEXT_PUBLIC_API_URL defaults to http://localhost:8000
 npm install
-npm run dev    # http://localhost:3000, expects the backend on :8000
+npm run dev                   # http://localhost:3000 (the backend's CORS allows this origin)
 ```
 
-Details, features and design decisions are in [`frontend/NOTES.md`](frontend/NOTES.md).
+`NEXT_PUBLIC_API_URL` is inlined at build time, so set it before `npm run build` / `npm start`.
 
-## API
+### Tests and checks
 
-`GET /api/projects[?require_preview=true|false]` returns `200`:
+| Where | Command | What it covers |
+|---|---|---|
+| backend | `uv run pytest` | 43 tests, no network (fake clients, temp SQLite DB) |
+| backend | `uv run ruff check .` | lint |
+| frontend | `npm test` | 10 tests on the pure logic in `src/lib` (`node:test`, no extra deps) |
+| frontend | `npm run lint` / `npm run build` | ESLint / production build (incl. type check) |
+
+## What I completed
+
+### Backend (`backend/`)
+
+- **Filter pipeline:** a market scan (`/coins/markets`, sorted by volume with an exact early exit), then details (`/coins/{id}`) only for the ~690 candidates that pass the cheap filters.
+- **Persistence:** coin details are stored in SQLite and re-checked only when missing or older than 6h, so restarts take ~10 s instead of ~8 min.
+- **Caching:** stale-while-revalidate with single-flight refresh. Requests never wait on CoinGecko, and a failed refresh keeps serving the last snapshot (`meta.last_error`).
+- **Rate limiting:** a concurrency semaphore, a minimum interval between requests, and retries with backoff that honour `Retry-After`.
+- **`GET /api/projects`** returns the matches plus `meta`, which explains the result. It includes a cumulative `funnel` showing how many coins survive each step.
+- **`?require_preview=false`:** a clearly labelled deviation from the spec that skips only the preview-listing rule. It's served from the same snapshot with no extra CoinGecko calls.
+- **`GET /api/projects/{id}?days=1|7|30`:**
+  - per-rule pass/fail, so you can see why a coin isn't in the list;
+  - a price/volume chart, cached and downsampled;
+  - an allow-list: only ids from the current scan are accepted, so the backend can't be used as an open CoinGecko proxy.
+- **One typed contract:** `backend/app/schemas.py` and `frontend/src/lib/types.ts` mirror each other field for field, with closed key sets. Every rule and funnel label is built once from the threshold settings, so neither side hardcodes `$100M` or `$50k`.
+- **Tests:** filters, client paging and retries, the SQLite store, the pipeline including the restart path, the query param, and the detail endpoint (404, 422, `passes`, chart cache, chart failure, null points).
+
+### Frontend (`frontend/`, Next.js 16 App Router, TypeScript, Tailwind; no UI libraries)
+
+- **Project list** from `GET /api/projects`, with a **screening funnel** on top: proportional bars of coins left after each filter, so it's clear at a glance what the list is and why it's short or empty.
+- **Search** by name or symbol: partial, case-insensitive and trimmed (`eth` → Ethereum).
+- **Max FDV filter** in USD:
+  - strict `<`;
+  - accepts shorthand: `500k`, `100M`, `1.5B`, `$2,000,000`;
+  - echoes the parsed value ("Under $50,000,000");
+  - ignores invalid input and says so.
+- **Sorting** by market cap or 24h volume, ascending or descending, from the toolbar or by clicking the column headers (kept in sync, with `aria-sort`).
+- **Preview-listing toggle** "Ignore preview-listing requirement (deviates from spec)": off by default, in the toolbar and in the empty state. When on, a notice says the list deviates from the spec.
+- **State in the URL** (`q`, `fdv`, `sort`, `dir`, `preview`), so going to a coin and back keeps the search, sort and toggle.
+- **Coin page** `/coins/[id]`:
+  - stats: price, market cap, FDV, volume, TVL, supplies;
+  - a ✓/✗ **Criteria** checklist showing which rules the coin fails;
+  - an inline-SVG **price chart** (1D / 7D / 30D) with high/low labels, last price and % change, volume bars, and a hover/tap/keyboard tooltip;
+  - if the chart can't load, the reason is shown and the rest of the page still works.
+- **Every real state handled:**
+  - loading skeletons with the same footprint as the content;
+  - "warming up" (neutral, auto-retry);
+  - a scan in progress;
+  - refreshing (polls every 5 s and stops when done);
+  - real errors (red, with **Retry**);
+  - backend-empty (explained with the funnel);
+  - empty after your filters (**Clear filters**);
+  - coin not found (404).
+- **Accessibility and layout:**
+  - WCAG AA contrast;
+  - visible focus;
+  - `prefers-reduced-motion` respected;
+  - right-aligned tabular numbers;
+  - a real `<Link>` per row, plus click anywhere on the row;
+  - at 375 px the page never scrolls sideways (the table scrolls in its own frame with a sticky name column).
+
+## Assumptions
+
+- **Null means fail.** A null in any filtered field excludes the coin. Coins with no max supply ("infinite") never pass the supply rule.
+- **Supply equality** allows a difference of at most one part per million (`math.isclose`, `SUPPLY_REL_TOL`), to absorb float noise.
+- **TVL** comes back from CoinGecko as `null` or a per-currency object; the `usd` value is used. A plain number is also accepted.
+- **Thresholds are strict** (`>`, `<`) and in USD.
+- **Freshness:** market fields are at most 5 min old (`CACHE_TTL_SECONDS`); `preview_listing` and TVL at most 6 h (`DETAILS_TTL_SECONDS`).
+- **Coverage:** the coin universe is what `/coins/markets` returns.
+- **Filtering and sorting in the browser.** The backend owns the six required criteria. Search, the FDV limit and sorting are user refinements on a short list (at most ~100 rows), so they run client-side with no extra round-trips.
+- **FDV filter:** empty input means no filter; projects with a null FDV are hidden while it's on.
+- **Search** matches the symbol as well as the name.
+- **Logos** are static images on CoinGecko's CDN, loaded with a plain `<img>`. They are not API calls.
+
+## Why the strict result is 0
+
+Measured on 2026-10-08 with a Demo key:
+
+| Step | Coins remaining |
+|---|---|
+| Scanned on `/coins/markets` (stopped at the volume cutoff) | 2,747 |
+| Market cap > 0, FDV < $100M, volume > $50k, max = total supply | 685 |
+| TVL > $50k | 107 |
+| On the preview listing | **0** |
+
+None of the 685 market-filtered candidates is on the preview listing, regardless of TVL.
+
+This is expected. The evidence below is our reading of CoinGecko's docs, not something CoinGecko states about the API field:
+
+- CoinGecko offers Preview Listing *"if your token has not launched yet"*, while an active listing *"must be actively tradable"* ([listing guide](https://support.coingecko.com/hc/en-us/articles/7291312302617)).
+- A preview-listed token *"will not track price data immediately"* ([preview-listing guide](https://support.coingecko.com/hc/en-us/articles/40576012083097)).
+- So a preview-listed coin most likely isn't trading yet. "On the preview listing **and** 24h volume > $50k (and TVL > $50k)" is close to contradictory.
+
+The UI explains this in the empty state and names the step where the count hits 0. The **deviation toggle** (`?require_preview=false`) shows the 107 coins that pass the other five rules, so the rest of the pipeline can be inspected. It is clearly labelled as **not the spec**; the default is the spec.
+
+## Limitations
+
+- **Unverified:** whether preview-listed coins appear in `/coins/markets` at all. If they don't, no pipeline built on that endpoint can find them. Settling this needs a known preview-listed coin id.
+- **Cold start:** the very first scan takes ~8 min on the Demo plan; keyless use is impractical.
+- **Single process:** the result cache is in-process and the DB is a local SQLite file. A real deployment would use Postgres/Redis plus one scheduled refresher.
+- **Coverage cap:** `MAX_PAGES` (12) limits coverage if the volume cutoff ever moves past page 12.
+- **Frontend:**
+  - no dark mode;
+  - no pagination or virtualization (not needed at ≤ ~100 rows);
+  - the chart range isn't stored in the URL;
+  - `NEXT_PUBLIC_API_URL` is fixed at build time.
+- **Testing:** UI states were verified manually with Playwright screenshots, using a script kept outside the repo. There are no automated component tests.
+
+## API reference
+
+`backend/app/schemas.py` and `frontend/src/lib/types.ts` define the same models; change them together.
+
+### `GET /api/projects[?require_preview=false]`
 
 ```json
 {
   "count": 1,
-  "items": [
-    {
-      "id": "...", "symbol": "...", "name": "...", "image": "https://...",
-      "coingecko_url": "https://www.coingecko.com/en/coins/...",
-      "current_price": 0.12, "market_cap": 1200000.0, "fully_diluted_valuation": 1200000.0,
-      "total_volume": 80000.0, "total_supply": 10000000.0, "max_supply": 10000000.0,
-      "total_value_locked": 75000.0, "preview_listing": true
-    }
-  ],
+  "items": [{
+    "id": "...", "symbol": "...", "name": "...", "image": "https://...",
+    "coingecko_url": "https://www.coingecko.com/en/coins/...",
+    "current_price": 0.12, "market_cap": 1200000.0, "fully_diluted_valuation": 1200000.0,
+    "total_volume": 80000.0, "total_supply": 10000000.0, "max_supply": 10000000.0,
+    "total_value_locked": 75000.0, "preview_listing": true
+  }],
   "meta": {
-    "scanned": 2750, "pages_fetched": 11, "after_prefilter": 692,
-    "preview_listed": 1, "tvl_above_min": 107, "after_details": 1,
+    "scanned": 2747, "pages_fetched": 11, "after_prefilter": 685,
+    "preview_listed": 0, "tvl_above_min": 107, "after_details": 0,
     "details_fetched": 3, "detail_errors": 0, "fetched_at": "2026-10-08T19:46:00Z", "age_seconds": 12.3,
-    "stale": false, "refreshing": false, "last_error": null,
-    "require_preview": true,
+    "stale": false, "refreshing": false, "last_error": null, "require_preview": true,
     "funnel": [
       {"key": "scanned", "label": "Scanned on CoinGecko markets", "passed": 2747},
       {"key": "market_filters", "label": "Market cap > 0, FDV < $100M, 24h volume > $50k, Max supply = total supply", "passed": 685},
       {"key": "tvl", "label": "TVL > $50k", "passed": 107},
-      {"key": "preview_listing", "label": "On CoinGecko's preview listing", "passed": 1}
+      {"key": "preview_listing", "label": "On CoinGecko's preview listing", "passed": 0}
     ]
   }
 }
 ```
 
-- `meta` explains the result. It reports how many coins were scanned and how many survived the cheap filters (`after_prefilter`). Among those, it reports how many are preview-listed (`preview_listed`) and how many have TVL above $50k (`tvl_above_min`); `after_details` is how many pass both. `details_fetched` is the number of `/coins/{id}` calls made by the last refresh. **An empty `items` list is a valid result**, not an error.
-- `meta.funnel` lists the pipeline steps in order. Each `passed` is the cumulative number of coins still in after that step: scanned → market filters → TVL → preview_listing. Labels are built from the configured thresholds by `rule_labels` (the same source as the detail `passes` labels), so clients never hardcode them. The funnel is the same for both values of `require_preview`.
-- `require_preview` (default `true`): see the deviation note under "Why the strict result is 0". The value is echoed in `meta.require_preview`. `meta.after_details` always reports the strict (all six criteria) count.
-- `503`: the cache is still warming up, or CoinGecko kept rate-limiting after retries. The response has a `detail` message and `Retry-After`.
-- `502`: CoinGecko was unreachable or returned an unexpected error.
-- CORS allows `http://localhost:3000` (configurable via `CORS_ORIGINS`).
+- **An empty `items` list is a valid result.**
+- `meta.funnel` is cumulative: coins left after each step.
+- `meta.after_details` is always the strict count (all six criteria), even with `require_preview=false`.
+- `503` means the cache is warming up, or CoinGecko kept rate-limiting; it comes with `detail` and `Retry-After`. `502` means CoinGecko failed.
+- CORS allows `http://localhost:3000` (`CORS_ORIGINS`).
 
-### `GET /api/projects/{coin_id}?days=7`
-
-Details for one coin. `days` must be `1`, `7` (default) or `30`; anything else returns `422`.
+### `GET /api/projects/{coin_id}?days=1|7|30`
 
 ```json
 {
-  "project": { "id": "dodo", "symbol": "dodo", "name": "DODO", "...": "same fields as list items" },
+  "project": { "...": "same fields as list items; numbers may be null here" },
   "details": { "preview_listing": false, "tvl_usd": 12469538.0, "checked_at": "2026-10-08T19:55:16Z" },
   "passes": [
     {"key": "market_cap", "label": "Market cap > 0", "passed": true},
@@ -112,87 +218,64 @@ Details for one coin. `days` must be `1`, `7` (default) or `30`; anything else r
 }
 ```
 
-- **Allow-list:** only ids from the current market scan (about 2,750 coins) are accepted. Anything else returns `404`, so the backend can't be used to proxy arbitrary CoinGecko requests. `503` while warming up, same as the list endpoint.
-- **Data sources:**
-  - `project` comes from the cached market scan and is never re-fetched for this endpoint. The fields share the list schema, but they can be `null` here, because any scanned coin is allowed, not only coins that passed.
-  - `details` is the stored SQLite row. It is `null` if the coin was never checked via `/coins/{id}`, which happens when it failed the market filters.
-- **`passes`** lists all six criteria in pipeline order as `{key, label, passed}`, so the UI can show which rules a coin fails. A null or unknown value counts as a fail. `key` is a closed set (`RuleKey`: `market_cap`, `fdv`, `volume`, `supply`, `tvl`, `preview_listing`); labels come from the configured thresholds.
-- **Typed on both sides:** `backend/app/schemas.py` and `frontend/src/lib/types.ts` define the same models field for field; change them together.
-- **`chart`** comes from `/coins/{id}/market_chart?vs_currency=usd&days=N`:
-  - It goes through the shared rate limiter and retries. It skips the background concurrency queue, so it never waits behind a detail refresh.
-  - It is cached in memory per `(id, days)` for 10 min (`CHART_CACHE_TTL_SECONDS`).
-  - Points with a `null` value are dropped, then the series is downsampled to at most 200 points by keeping every k-th point plus the last one. The raw sizes are 288, 168 and 720 points for 1, 7 and 30 days.
-- **Chart errors:** if the chart call fails or exceeds `CHART_TIMEOUT` (20s), the response is still `200`, with `chart: null` and `chart_error` holding CoinGecko's error. Failures are not cached.
+- **Allowed ids:** only ids from the current scan (~2,750 coins). Others return `404`; `days` other than 1, 7 or 30 returns `422`.
+- **`project`** comes from the cached scan. Its numbers can be `null` here, because any scanned coin is allowed, not only coins that passed.
+- **`details`** is `null` if the coin was never checked via `/coins/{id}` (it failed the market filters).
+- **The chart:**
+  - comes from `/coins/{id}/market_chart`;
+  - is cached for 10 min per `(id, days)`;
+  - has null points dropped;
+  - is downsampled to ≤ 200 points.
+- **If the chart fails or times out (20 s),** the response is still `200`, with `chart: null` and `chart_error` holding the reason.
 
 ## How it works
 
-The data is split across two endpoints, so the pipeline runs in two steps:
+**Backend pipeline:**
 
-1. **Market scan (always fresh).** Page through `/coins/markets?vs_currency=usd&order=volume_desc&per_page=250` and apply the cheap filters (market cap, FDV, volume, supply). Rows are deduplicated by `id`, because rankings can shift between page requests.
-2. **Details (persisted).** `preview_listing` and TVL change slowly, so they are stored in SQLite (table `coins(id, preview_listing, tvl_usd, checked_at)`). `/coins/{id}` is called **only** for candidates that are missing from the DB or whose `checked_at` is older than `DETAILS_TTL_SECONDS` (default 6h). The call uses `localization/tickers/community_data/developer_data/sparkline=false` to keep payloads small. Each result is upserted as soon as it arrives, so an interrupted cold start keeps its progress.
-3. **Combine.** The fresh market rows are joined with the stored details, and the TVL rule is applied. Prices, volume, market cap and supply therefore always come from the latest scan.
-4. **Per request.** The `preview_listing` rule is applied to the cached snapshot when the response is built. That's why `require_preview=false` costs no extra CoinGecko calls.
+1. **Market scan.** Page through `/coins/markets?order=volume_desc&per_page=250` and apply the cheap filters (market cap, FDV, volume, supply). Rows are deduplicated by `id`, because rankings shift between page requests.
+   - **Why volume order:** once a page's last coin has volume ≤ $50k, no later coin can pass, so paging stops exactly; today that's page 11.
+   - **Why not market-cap order:** it puts the coins that can't pass first, so it never gives a point where you can stop.
+2. **Details.** `/coins/{id}` is called only for candidates missing from SQLite or older than 6 h. Each result is upserted as soon as it arrives, so an interrupted cold start keeps its progress.
+3. **Combine.** Fresh market rows are joined with the stored details, and the TVL rule is applied.
+4. **Per request.** The preview rule is applied to the cached snapshot, which is why `require_preview=false` is free.
 
-**Why `order=volume_desc`.** Sorting by volume gives an exact early exit. Once the last coin on a page has volume ≤ $50k, no later coin can pass, so paging stops; today that happens at page 11 (about 2,750 coins). I also considered `market_cap_desc`, using the fact that mcap ≤ FDV means coins with mcap ≥ $100M can't pass. But those coins come *first* in that order, so it skips nothing up front and has no point where you can stop. `MAX_PAGES` (default 12) is a safety cap.
+**Caching:**
+- The snapshot is cached for 5 min.
+- After that, the next request triggers **one** background refresh (single-flight) and is still answered from the cache (`meta.stale`, `meta.refreshing`).
+- SQLite access uses stdlib `sqlite3` via `asyncio.to_thread`. No ORM.
 
-**Rate limiting.** CoinGecko is protected by three layers:
-- an `asyncio.Semaphore` caps concurrency (`CONCURRENCY=5`)
-- a minimum interval between request starts (`MIN_REQUEST_INTERVAL=0.67s`, about 1.5 req/s, under the Demo plan's ~100/min)
-- retries on 429/5xx/network errors with exponential backoff, using `Retry-After` when present (capped at 60s)
+**Frontend:**
+- **Data and polling.** A client component fetches the backend with `AbortController` and a 30 s timeout. It polls every 5 s while the backend is warming or refreshing, and cleans up so React StrictMode leaves a single loop.
+- **Testable logic.** Search, FDV parsing, sorting, page phases, URL state and chart geometry are pure functions in `src/lib`, each with unit tests.
+- **Design.** "The screen is the explanation": the funnel is the one prominent element, and colour carries meaning only (amber = in progress, red = real failure, blue = interactive). Public Sans throughout.
 
-**Caching (stale-while-revalidate).**
-- The final result is cached in memory for `CACHE_TTL_SECONDS=300`. After that, the next request triggers a refresh: market pages, then details only for coins that need them.
-- Requests never wait on CoinGecko. They get the cached snapshot, and a stale one triggers **one** background refresh. Single-flight: concurrent requests can't start a second refresh. `meta.stale` and `meta.refreshing` show the state.
-- If a refresh fails, the previous snapshot is still served, with `meta.last_error` set.
-- **SQLite access** uses stdlib `sqlite3`, synchronous, with a fresh connection per call. Calls run via `asyncio.to_thread`, so the event loop never blocks on disk. Each call is a tiny read or an upsert of one row, which keeps the code simple and avoids sqlite3's same-thread restriction for connections. No ORM and no extra dependencies.
+## AI workflow
 
-## Assumptions
+Built with Claude Code (Claude Opus 5.5). I wrote the briefs and reviewed plans and results. The AI planned, generated the code and ran the checks. Backend and frontend were built in parallel sessions against an agreed contract.
 
-- **Null means fail.** A null in any filtered field (`market_cap`, `fully_diluted_valuation`, `total_volume`, `max_supply`, `total_supply`, `total_value_locked`, `preview_listing`) excludes the coin. Coins with no max supply ("infinite") therefore never pass the supply rule.
-- **Supply equality** uses `math.isclose(max_supply, total_supply, rel_tol=1e-6)`, i.e. they may differ by at most one part per million, to absorb float noise. This is configurable as `SUPPLY_REL_TOL`.
-- **TVL shape.** On the live API, `total_value_locked` is `null` or a per-currency object (`{"btc": ..., "usd": ...}`); we use the `usd` value. A plain number is also accepted.
-- **Thresholds are strict** (`>` and `<`) and in USD (`vs_currency=usd`).
-- **Detail freshness.** `preview_listing` and TVL can be up to `DETAILS_TTL_SECONDS` (6h) old. All market fields are at most `CACHE_TTL_SECONDS` old.
-- **Coverage.** The "universe" is what `/coins/markets` returns. Coins that endpoint omits can't be found.
+**Verified against the real API before coding:**
+- `preview_listing` is top-level.
+- TVL is `null` or a per-currency object.
+- `volume_desc` paging hits the $50k cutoff at page 11.
+- Duplicate ids occur across pages.
+- About 690 candidates survive the cheap filters, which drove the cached/background design.
+- Keyless access hits 429 after ~5 calls.
+- The `market_chart` shape.
 
-## Why the strict result is 0
+**Corrections along the way:**
+- Switched from `market_cap_desc` to `volume_desc`.
+- The first request no longer blocks for minutes: warm-up in the background, with `503` until the first scan finishes.
+- `TaskGroup` exception unwrapping.
+- `IntEnum` for `days`, because `Literal` rejected valid values.
+- Replaced the sentence-style controls with a labelled toolbar after they wrapped badly.
+- Fixed several layout bugs found in screenshots (overflowing selects, chart label collisions, a stat-grid gap).
+- Tap support for the chart tooltip.
+- Replaced a frontend adapter with one typed contract after the first detail endpoint drifted from the agreed shape.
 
-Measured on 2026-10-08 (Demo key):
-
-| Step | Coins remaining |
-|---|---|
-| Scanned on `/coins/markets` (stopped at the volume cutoff) | 2,747 |
-| Market cap > 0, FDV < $100M, volume > $50k, max = total supply | 685 |
-| TVL > $50k | 107 |
-| `preview_listing == true` | **0** |
-
-Of the 685 market-filtered candidates, **none** has `preview_listing == true`, regardless of TVL. `preview_listing` is the criterion that empties the result.
-
-**Evidence that this is expected rather than a bug** (this is our interpretation of CoinGecko's docs, not something CoinGecko states about the API field):
-
-- CoinGecko's listing guide offers "Active Listing or Preview Listing" and points to Preview Listing *"if your token has not launched yet"*. It also requires that an actively listed coin *"must be actively tradable on a cryptocurrency exchange tracked by CoinGecko"* ([How to List a New Cryptocurrency on CoinGecko](https://support.coingecko.com/hc/en-us/articles/7291312302617)).
-- CoinGecko's preview-listing guide says a preview-listed token *"will not track price data immediately"*. It has to be activated on its token generation date ([How to Preview List Tokens on CoinGecko](https://support.coingecko.com/hc/en-us/articles/40576012083097)).
-- So a coin with `preview_listing == true` most likely hasn't started trading yet and has no tracked market data. That makes "`preview_listing == true` **and** 24h volume > $50k" (and, in practice, market cap > 0 and TVL) close to contradictory.
-
-**Deviation: `require_preview=false`.** `GET /api/projects?require_preview=false` skips **only** the `preview_listing` criterion; the other five still apply. It's served from the same cached snapshot, with no extra CoinGecko calls. It currently returns 107 coins. **This is not the spec.** It exists so you can inspect the rest of the pipeline (and give the frontend something to render). The default (`true`) is the spec.
-
-## Limitations
-
-- **Unverified:** whether preview-listed coins appear in `/coins/markets` at all. If they don't, no pipeline built on `/coins/markets` can find them. Confirming this needs a known preview-listed coin id, or a detail scan of a much wider set.
-- The very first scan takes about 8 minutes on the Demo plan (~690 detail calls). After that, SQLite makes restarts fast. Keyless use is not practical.
-- The result cache is in-process and the DB is a local file. Fine for one process; several workers would each refresh on their own (they'd share the SQLite file, though). A real deployment would use Postgres or Redis plus a single scheduled refresher.
-- `MAX_PAGES` caps coverage if the volume cutoff ever moves past page 12.
-
-## What's done
-
-- [x] Backend: FastAPI, async httpx client, two-step filter pipeline, caching, rate limiting, retries, CORS, `/health`
-- [x] SQLite persistence for coin details: fast restarts, and only stale or new coins are re-checked
-- [x] Coin detail endpoint `GET /api/projects/{coin_id}` (allow-listed ids, per-criterion `passes`, cached and downsampled chart)
-- [x] `meta.funnel` (cumulative per-criterion counts) and `require_preview` query param (documented deviation)
-- [x] Unit tests (no network; temp DB) for the filters, the client's paging/retries, the store, the combine/select/funnel steps, the service pipeline including the restart path, the query param, and the detail endpoint (404/422, `passes`, chart cache, chart failure)
-- [x] Frontend: Next.js app with a screening funnel, search, sorting and a preview-listing toggle (see `frontend/NOTES.md`)
+**Checked by hand:** Playwright screenshots of every UI state at 1280 and 375 px. The real backend was used where possible (live data, 404); fake responses were used for states that can't be produced on demand (loading, warm-up, errors, a missing chart). Network requests go only to `localhost:8000`, plus the logo CDN.
 
 ## Next steps
 
-- Periodic background refresh, so the cache is never stale when a request comes in.
-- Find a known preview-listed coin to settle the open question above. If preview coins are missing from `/coins/markets`, discover them another way, e.g. diff `/coins/list` against market ids and check the leftovers via `/coins/{id}`. Their market fields would likely be empty, though.
+- A periodic background refresh, so the cache is never stale when a request arrives.
+- Find a known preview-listed coin to settle whether `/coins/markets` includes them at all (e.g. diff `/coins/list` against the market ids).
+- Show `meta.last_error` in the UI, add Playwright component tests, and keep the chart range in the URL.
