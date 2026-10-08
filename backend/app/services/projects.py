@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.config import Settings
-from app.schemas import Meta, Project, ProjectsResponse
+from app.schemas import FunnelStep, Meta, Project, ProjectsResponse
 from app.services.coingecko import CoinGeckoClient, CoinGeckoError
 from app.services.details_store import CoinDetails, DetailsStore, is_fresh
 from app.services.filters import (
@@ -28,12 +28,13 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Snapshot:
-    items: list[Project]
+    tvl_passing: list[Project]  # passed the 5 non-preview criteria; preview applied per request
+    after_details: int
+    funnel: list[FunnelStep]
     scanned: int
     pages_fetched: int
     after_prefilter: int
     preview_listed: int
-    tvl_above_min: int
     details_fetched: int
     detail_errors: int
     fetched_at: datetime
@@ -42,9 +43,8 @@ class Snapshot:
 
 @dataclass
 class Combined:
-    items: list[Project]
-    preview_listed: int
-    tvl_above_min: int
+    tvl_passing: list[Project]  # candidates with stored details and TVL > TVL_MIN
+    preview_listed: int  # candidates with stored details and preview_listing == true
 
 
 class ProjectService:
@@ -74,8 +74,12 @@ class ProjectService:
         snap = self._snapshot
         return snap is None or time.monotonic() - snap.fetched_monotonic >= self.s.cache_ttl_seconds
 
-    async def get_projects(self) -> ProjectsResponse:
-        """Never blocks on CoinGecko: serves the cached snapshot and refreshes in the background."""
+    async def get_projects(self, require_preview: bool = True) -> ProjectsResponse:
+        """Never blocks on CoinGecko: serves the cached snapshot and refreshes in the background.
+
+        Both variants are filtered from the same cached snapshot, so require_preview costs
+        no extra CoinGecko calls.
+        """
         stale = self._is_stale()
         if stale:
             self.start_refresh()
@@ -83,16 +87,17 @@ class ProjectService:
         if snap is None:
             reason = f" Last attempt failed: {self._last_error.message}" if self._last_error else ""
             raise CoinGeckoError(503, f"Data is warming up, retry shortly.{reason}")
+        items = select(snap.tvl_passing, require_preview, self.s)
         return ProjectsResponse(
-            count=len(snap.items),
-            items=snap.items,
+            count=len(items),
+            items=items,
             meta=Meta(
                 scanned=snap.scanned,
                 pages_fetched=snap.pages_fetched,
                 after_prefilter=snap.after_prefilter,
                 preview_listed=snap.preview_listed,
-                tvl_above_min=snap.tvl_above_min,
-                after_details=len(snap.items),
+                tvl_above_min=len(snap.tvl_passing),
+                after_details=snap.after_details,
                 details_fetched=snap.details_fetched,
                 detail_errors=snap.detail_errors,
                 fetched_at=snap.fetched_at,
@@ -100,6 +105,8 @@ class ProjectService:
                 stale=stale,
                 refreshing=self.refreshing,
                 last_error=self._last_error.message if self._last_error else None,
+                require_preview=require_preview,
+                funnel=snap.funnel,
             ),
         )
 
@@ -111,7 +118,7 @@ class ProjectService:
             log.info(
                 "Refresh done in %.1fs: %d projects, %d detail calls",
                 time.monotonic() - started,
-                len(self._snapshot.items),
+                self._snapshot.after_details,
                 self._snapshot.details_fetched,
             )
         except CoinGeckoError as exc:
@@ -166,13 +173,17 @@ class ProjectService:
             raise group.exceptions[0] from None
 
         combined = combine(candidates, stored, self.s)
+        strict_count = len(select(combined.tvl_passing, True, self.s))
         return Snapshot(
-            items=combined.items,
+            tvl_passing=combined.tvl_passing,
+            after_details=strict_count,
+            funnel=build_funnel(
+                self.s, len(rows), len(candidates), len(combined.tvl_passing), strict_count
+            ),
             scanned=len(rows),
             pages_fetched=pages,
             after_prefilter=len(candidates),
             preview_listed=combined.preview_listed,
-            tvl_above_min=combined.tvl_above_min,
             details_fetched=len(to_fetch) - errors,
             detail_errors=errors,
             fetched_at=datetime.now(UTC),
@@ -192,19 +203,52 @@ def parse_details(coin_id: str, detail: dict[str, Any], checked_at: datetime) ->
 def combine(
     candidates: list[dict[str, Any]], details: dict[str, CoinDetails], s: Settings
 ) -> Combined:
-    """Join fresh market rows with stored details and apply the detail criteria."""
+    """Join fresh market rows with stored details and apply the TVL criterion.
+
+    preview_listing is applied later by `select`, per request.
+    """
     known = [(row, details[row["id"]]) for row in candidates if row["id"] in details]
-    items = [
-        to_project(row, d)
-        for row, d in known
-        if passes_detail_filters(d.preview_listing, d.tvl_usd, s)
-    ]
+    items = [to_project(row, d) for row, d in known if tvl_above(d.tvl_usd, s.tvl_min)]
     items.sort(key=lambda p: p.total_volume, reverse=True)
     return Combined(
-        items=items,
+        tvl_passing=items,
         preview_listed=sum(d.preview_listing for _, d in known),
-        tvl_above_min=sum(tvl_above(d.tvl_usd, s.tvl_min) for _, d in known),
     )
+
+
+def select(tvl_passing: list[Project], require_preview: bool, s: Settings) -> list[Project]:
+    """All six criteria by default; require_preview=False drops only preview_listing."""
+    if not require_preview:
+        return tvl_passing
+    return [
+        p for p in tvl_passing if passes_detail_filters(p.preview_listing, p.total_value_locked, s)
+    ]
+
+
+def usd_short(value: float) -> str:
+    for divisor, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "k")):
+        if value >= divisor:
+            return f"${value / divisor:g}{suffix}"
+    return f"${value:g}"
+
+
+def build_funnel(
+    s: Settings, scanned: int, market: int, tvl: int, preview: int
+) -> list[FunnelStep]:
+    """Cumulative counts in pipeline order; labels follow the configured thresholds."""
+    return [
+        FunnelStep(key="scanned", label="Scanned on CoinGecko markets", passed=scanned),
+        FunnelStep(
+            key="market_filters",
+            label=(
+                f"Market cap > 0, FDV < {usd_short(s.fdv_max)}, "
+                f"24h volume > {usd_short(s.volume_min)}, max supply = total supply"
+            ),
+            passed=market,
+        ),
+        FunnelStep(key="tvl", label=f"TVL > {usd_short(s.tvl_min)}", passed=tvl),
+        FunnelStep(key="preview_listing", label="preview_listing = true", passed=preview),
+    ]
 
 
 def to_project(row: dict[str, Any], details: CoinDetails) -> Project:

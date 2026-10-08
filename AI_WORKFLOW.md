@@ -31,8 +31,12 @@ Tool: Claude Code (Claude Opus 5.5). I wrote the brief; the AI planned, generate
 - Added `meta.preview_listed` and `meta.tvl_above_min` after the first full run returned 0 matches, so the empty result can be explained.
 - **SQLite for details (my follow-up request).** The in-memory detail cache was replaced by `backend/data/coins.db` (stdlib `sqlite3`, run via `asyncio.to_thread`). As a result `services/cache.py` was removed: the final result is the in-memory snapshot in `projects.py`, and details live in SQLite. This is a deliberate deviation from the original target structure.
 
+- **`require_preview` and `meta.funnel` (my follow-up request).** The preview rule is now applied per request from the cached snapshot. `require_preview=false` is documented as a deviation for inspecting the pipeline.
+- **Checking the README citation.** The support page I cited is behind Cloudflare (403 for plain fetches), so the AI read it through the help center's public JSON API (`/api/v2/help_center/en-us/articles/<id>.json`). That confirmed the "if your token has not launched yet" wording. It also found the linked preview-listing guide, which says preview-listed tokens "will not track price data immediately". Both are quoted in the README as evidence, not as a confirmed fact about the API.
+
 ## Measured results (Demo key, 2026-10-08)
 - Full run: 2,748 coins scanned on 11 pages → 692 passed the cheap filters → 107 with TVL > $50k, **0 preview-listed** → **0 matches**. No 429s at 1.5 req/s.
+- With `require_preview=false` (deviation): 107 coins (2,747 → 685 → 107 → 0 strict).
 - Cold refresh (empty DB): **470.8 s**. Restart with a filled DB: **9.7 s** (11 market pages + 4 detail calls for newly qualifying coins). A second SQLite-backed cold run gave 690 candidates, 106 with TVL > $50k, 0 preview-listed.
 
 ## Not verified

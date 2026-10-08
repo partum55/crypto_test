@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.config import Settings
 from app.services.details_store import CoinDetails, DetailsStore, is_fresh
-from app.services.projects import combine
+from app.services.projects import build_funnel, combine, select, usd_short
 
 S = Settings(_env_file=None)
 NOW = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
@@ -70,8 +70,32 @@ def test_combine_uses_fresh_market_data_and_stored_details():
         "stale-not-candidate": CoinDetails("stale-not-candidate", True, 1e6, NOW),
     }
     result = combine(candidates, details, S)
-    assert [p.id for p in result.items] == ["high", "low"]  # sorted by volume desc
-    assert result.items[0].total_volume == 900_000  # from the market row
-    assert result.items[0].total_value_locked == 1e6  # from the DB
+    # TVL applied here; sorted by volume desc; "unknown" has no stored details.
+    assert [p.id for p in result.tvl_passing] == ["high", "not-preview", "low"]
+    assert result.tvl_passing[0].total_volume == 900_000  # from the market row
+    assert result.tvl_passing[0].total_value_locked == 1e6  # from the DB
     assert result.preview_listed == 3
-    assert result.tvl_above_min == 3
+
+    assert [p.id for p in select(result.tvl_passing, True, S)] == ["high", "low"]
+    # require_preview=False drops only the preview rule: TVL-less "no-tvl" stays out.
+    assert [p.id for p in select(result.tvl_passing, False, S)] == ["high", "not-preview", "low"]
+
+
+def test_usd_short():
+    assert usd_short(100_000_000) == "$100M"
+    assert usd_short(50_000) == "$50k"
+    assert usd_short(2_500_000_000) == "$2.5B"
+    assert usd_short(999) == "$999"
+
+
+def test_funnel_labels_follow_config():
+    s = Settings(_env_file=None, fdv_max=25_000_000, volume_min=10_000, tvl_min=1_000_000)
+    funnel = build_funnel(s, 2750, 690, 107, 0)
+    assert [(f.key, f.passed) for f in funnel] == [
+        ("scanned", 2750),
+        ("market_filters", 690),
+        ("tvl", 107),
+        ("preview_listing", 0),
+    ]
+    assert "FDV < $25M" in funnel[1].label and "24h volume > $10k" in funnel[1].label
+    assert funnel[2].label == "TVL > $1M"

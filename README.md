@@ -43,7 +43,7 @@ Coin details are stored in `backend/data/coins.db` (SQLite, gitignored). Delete 
 
 ## API
 
-`GET /api/projects` returns `200`:
+`GET /api/projects[?require_preview=true|false]` returns `200`:
 
 ```json
 {
@@ -61,12 +61,21 @@ Coin details are stored in `backend/data/coins.db` (SQLite, gitignored). Delete 
     "scanned": 2750, "pages_fetched": 11, "after_prefilter": 692,
     "preview_listed": 1, "tvl_above_min": 107, "after_details": 1,
     "details_fetched": 3, "detail_errors": 0, "fetched_at": "2026-10-08T19:46:00Z", "age_seconds": 12.3,
-    "stale": false, "refreshing": false, "last_error": null
+    "stale": false, "refreshing": false, "last_error": null,
+    "require_preview": true,
+    "funnel": [
+      {"key": "scanned", "label": "Scanned on CoinGecko markets", "passed": 2747},
+      {"key": "market_filters", "label": "Market cap > 0, FDV < $100M, 24h volume > $50k, max supply = total supply", "passed": 685},
+      {"key": "tvl", "label": "TVL > $50k", "passed": 107},
+      {"key": "preview_listing", "label": "preview_listing = true", "passed": 1}
+    ]
   }
 }
 ```
 
 - `meta` explains the result. It reports how many coins were scanned and how many survived the cheap filters (`after_prefilter`). Among those, it reports how many are preview-listed (`preview_listed`) and how many have TVL above $50k (`tvl_above_min`); `after_details` is how many pass both. `details_fetched` is the number of `/coins/{id}` calls made by the last refresh. **An empty `items` list is a valid result**, not an error.
+- `meta.funnel` lists the pipeline steps in order. Each `passed` is the cumulative number of coins still in after that step: scanned → market filters → TVL → preview_listing. Labels are built from the configured thresholds. The funnel is the same for both values of `require_preview`.
+- `require_preview` (default `true`): see the deviation note under "Why the strict result is 0". The value is echoed in `meta.require_preview`. `meta.after_details` always reports the strict (all six criteria) count.
 - `503`: the cache is still warming up, or CoinGecko kept rate-limiting after retries. The response has a `detail` message and `Retry-After`.
 - `502`: CoinGecko was unreachable or returned an unexpected error.
 - CORS allows `http://localhost:3000` (configurable via `CORS_ORIGINS`).
@@ -77,7 +86,8 @@ The data is split across two endpoints, so the pipeline runs in two steps:
 
 1. **Market scan (always fresh).** Page through `/coins/markets?vs_currency=usd&order=volume_desc&per_page=250` and apply the cheap filters (market cap, FDV, volume, supply). Rows are deduplicated by `id`, because rankings can shift between page requests.
 2. **Details (persisted).** `preview_listing` and TVL change slowly, so they are stored in SQLite (table `coins(id, preview_listing, tvl_usd, checked_at)`). `/coins/{id}` is called **only** for candidates that are missing from the DB or whose `checked_at` is older than `DETAILS_TTL_SECONDS` (default 6h). The call uses `localization/tickers/community_data/developer_data/sparkline=false` to keep payloads small. Each result is upserted as soon as it arrives, so an interrupted cold start keeps its progress.
-3. **Combine.** The fresh market rows are joined with the stored details, and the `preview_listing` and TVL rules are applied. Prices, volume, market cap and supply therefore always come from the latest scan.
+3. **Combine.** The fresh market rows are joined with the stored details, and the TVL rule is applied. Prices, volume, market cap and supply therefore always come from the latest scan.
+4. **Per request.** The `preview_listing` rule is applied to the cached snapshot when the response is built. That's why `require_preview=false` costs no extra CoinGecko calls.
 
 **Why `order=volume_desc`.** Sorting by volume gives an exact early exit. Once the last coin on a page has volume ≤ $50k, no later coin can pass, so paging stops; today that happens at page 11 (about 2,750 coins). I also considered `market_cap_desc`, using the fact that mcap ≤ FDV means coins with mcap ≥ $100M can't pass. But those coins come *first* in that order, so it skips nothing up front and has no point where you can stop. `MAX_PAGES` (default 12) is a safety cap.
 
@@ -101,9 +111,29 @@ The data is split across two endpoints, so the pipeline runs in two steps:
 - **Detail freshness.** `preview_listing` and TVL can be up to `DETAILS_TTL_SECONDS` (6h) old. All market fields are at most `CACHE_TTL_SECONDS` old.
 - **Coverage.** The "universe" is what `/coins/markets` returns. Coins that endpoint omits can't be found.
 
+## Why the strict result is 0
+
+Measured on 2026-10-08 (Demo key):
+
+| Step | Coins remaining |
+|---|---|
+| Scanned on `/coins/markets` (stopped at the volume cutoff) | 2,747 |
+| Market cap > 0, FDV < $100M, volume > $50k, max = total supply | 685 |
+| TVL > $50k | 107 |
+| `preview_listing == true` | **0** |
+
+Of the 685 market-filtered candidates, **none** has `preview_listing == true`, regardless of TVL. `preview_listing` is the criterion that empties the result.
+
+**Evidence that this is expected rather than a bug** (this is our interpretation of CoinGecko's docs, not something CoinGecko states about the API field):
+
+- CoinGecko's listing guide offers "Active Listing or Preview Listing" and points to Preview Listing *"if your token has not launched yet"*. It also requires that an actively listed coin *"must be actively tradable on a cryptocurrency exchange tracked by CoinGecko"* ([How to List a New Cryptocurrency on CoinGecko](https://support.coingecko.com/hc/en-us/articles/7291312302617)).
+- CoinGecko's preview-listing guide says a preview-listed token *"will not track price data immediately"*. It has to be activated on its token generation date ([How to Preview List Tokens on CoinGecko](https://support.coingecko.com/hc/en-us/articles/40576012083097)).
+- So a coin with `preview_listing == true` most likely hasn't started trading yet and has no tracked market data. That makes "`preview_listing == true` **and** 24h volume > $50k" (and, in practice, market cap > 0 and TVL) close to contradictory.
+
+**Deviation: `require_preview=false`.** `GET /api/projects?require_preview=false` skips **only** the `preview_listing` criterion; the other five still apply. It's served from the same cached snapshot, with no extra CoinGecko calls. It currently returns 107 coins. **This is not the spec.** It exists so you can inspect the rest of the pipeline (and give the frontend something to render). The default (`true`) is the spec.
+
 ## Limitations
 
-- **The result is currently empty.** Full run on 2026-10-08: 2,748 coins scanned, 692 passed the cheap filters, 107 of those have TVL above $50k, and **0 are preview-listed**. So nothing passes, and `preview_listing` is the limiting criterion.
 - **Unverified:** whether preview-listed coins appear in `/coins/markets` at all. If they don't, no pipeline built on `/coins/markets` can find them. Confirming this needs a known preview-listed coin id, or a detail scan of a much wider set.
 - The very first scan takes about 8 minutes on the Demo plan (~690 detail calls). After that, SQLite makes restarts fast. Keyless use is not practical.
 - The result cache is in-process and the DB is a local file. Fine for one process; several workers would each refresh on their own (they'd share the SQLite file, though). A real deployment would use Postgres or Redis plus a single scheduled refresher.
@@ -113,11 +143,12 @@ The data is split across two endpoints, so the pipeline runs in two steps:
 
 - [x] Backend: FastAPI, async httpx client, two-step filter pipeline, caching, rate limiting, retries, CORS, `/health`
 - [x] SQLite persistence for coin details: fast restarts, and only stale or new coins are re-checked
-- [x] Unit tests (no network; temp DB) for the filters, the client's paging/retries, the store, the combine step, and the service pipeline including the restart path
+- [x] `meta.funnel` (cumulative per-criterion counts) and `require_preview` query param (documented deviation)
+- [x] Unit tests (no network; temp DB) for the filters, the client's paging/retries, the store, the combine/select/funnel steps, the service pipeline including the restart path, and the query param
 - [ ] Frontend: TODO in this backend session (see `frontend/NOTES.md`)
 
 ## Next steps
 
 - Build the frontend: table, loading/warming state driven by `503` + `Retry-After`, and an empty state that shows `meta` counts.
 - Periodic background refresh, so the cache is never stale when a request comes in.
-- Find a known preview-listed coin to settle the open question above, and add a fallback source if needed.
+- Find a known preview-listed coin to settle the open question above. If preview coins are missing from `/coins/markets`, discover them another way, e.g. diff `/coins/list` against market ids and check the leftovers via `/coins/{id}`. Their market fields would likely be empty, though.

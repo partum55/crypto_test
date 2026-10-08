@@ -37,7 +37,7 @@ class FakeClient:
         self.detail_calls.append(coin_id)
         if coin_id == "gone":
             raise CoinGeckoError(502, "404")
-        tvl = {"usd": 75_000} if coin_id == "match" else None
+        tvl = {"usd": 75_000} if coin_id in ("match", "no-preview") else None
         return {"preview_listing": coin_id == "match", "market_data": {"total_value_locked": tvl}}
 
 
@@ -55,16 +55,30 @@ def test_cold_start_503_then_serves_snapshot(tmp_path):
             await service.get_projects()  # kicks off the refresh, doesn't wait
         assert exc.value.status == 503
         await service._task
-        return client, await service.get_projects()
+        return client, await service.get_projects(), await service.get_projects(False)
 
-    client, response = asyncio.run(scenario())
+    client, response, relaxed = asyncio.run(scenario())
     assert sorted(client.detail_calls) == ["gone", "match", "no-preview"]  # "big" prefiltered
     assert [p.id for p in response.items] == ["match"]
     assert response.items[0].total_value_locked == 75_000
     meta = response.meta
     assert (meta.scanned, meta.after_prefilter, meta.details_fetched) == (4, 3, 2)
-    assert (meta.detail_errors, meta.preview_listed, meta.tvl_above_min) == (1, 1, 1)
+    assert (meta.detail_errors, meta.preview_listed, meta.tvl_above_min) == (1, 1, 2)
+    assert (meta.after_details, meta.require_preview) == (1, True)
+    assert [(f.key, f.passed) for f in meta.funnel] == [
+        ("scanned", 4),
+        ("market_filters", 3),
+        ("tvl", 2),
+        ("preview_listing", 1),
+    ]
     assert not meta.stale and not meta.refreshing
+
+    # Same snapshot, preview rule skipped: no extra CoinGecko calls.
+    assert len(client.detail_calls) == 3
+    assert [p.id for p in relaxed.items] == ["match", "no-preview"]
+    assert (relaxed.count, relaxed.meta.require_preview) == (2, False)
+    assert relaxed.meta.after_details == 1  # strict count, unchanged
+    assert relaxed.meta.funnel == meta.funnel
 
 
 def test_restart_reuses_persisted_details(tmp_path):
