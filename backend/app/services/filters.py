@@ -40,9 +40,8 @@ def extract_tvl_usd(detail: dict[str, Any]) -> float | None:
     return tvl if isinstance(tvl, int | float) else None
 
 
-def tvl_above(detail: dict[str, Any], limit: float) -> bool:
-    tvl = extract_tvl_usd(detail)
-    return tvl is not None and tvl > limit
+def tvl_above(tvl_usd: float | None, limit: float) -> bool:
+    return tvl_usd is not None and tvl_usd > limit
 
 
 def passes_market_filters(row: dict[str, Any], s: Settings) -> bool:
@@ -55,6 +54,6 @@ def passes_market_filters(row: dict[str, Any], s: Settings) -> bool:
     )
 
 
-def passes_detail_filters(detail: dict[str, Any], s: Settings) -> bool:
-    """Criteria that need /coins/{id}."""
-    return is_preview_listing(detail) and tvl_above(detail, s.tvl_min)
+def passes_detail_filters(preview_listing: bool, tvl_usd: float | None, s: Settings) -> bool:
+    """Criteria that need /coins/{id} (values parsed by is_preview_listing / extract_tvl_usd)."""
+    return preview_listing and tvl_above(tvl_usd, s.tvl_min)

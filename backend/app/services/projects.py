@@ -1,4 +1,8 @@
-"""Runs the two-step filter pipeline and serves its result stale-while-revalidate."""
+"""Runs the two-step filter pipeline and serves its result stale-while-revalidate.
+
+Market data is fetched fresh on every refresh; per-coin details come from SQLite and are
+only re-fetched from /coins/{id} when missing or older than DETAILS_TTL_SECONDS.
+"""
 
 import asyncio
 import logging
@@ -10,7 +14,14 @@ from typing import Any
 from app.config import Settings
 from app.schemas import Meta, Project, ProjectsResponse
 from app.services.coingecko import CoinGeckoClient, CoinGeckoError
-from app.services.filters import extract_tvl_usd, passes_detail_filters, passes_market_filters
+from app.services.details_store import CoinDetails, DetailsStore, is_fresh
+from app.services.filters import (
+    extract_tvl_usd,
+    is_preview_listing,
+    passes_detail_filters,
+    passes_market_filters,
+    tvl_above,
+)
 
 log = logging.getLogger(__name__)
 
@@ -21,14 +32,25 @@ class Snapshot:
     scanned: int
     pages_fetched: int
     after_prefilter: int
+    preview_listed: int
+    tvl_above_min: int
+    details_fetched: int
     detail_errors: int
     fetched_at: datetime
     fetched_monotonic: float
 
 
+@dataclass
+class Combined:
+    items: list[Project]
+    preview_listed: int
+    tvl_above_min: int
+
+
 class ProjectService:
-    def __init__(self, client: CoinGeckoClient, settings: Settings):
+    def __init__(self, client: CoinGeckoClient, store: DetailsStore, settings: Settings):
         self.client = client
+        self.store = store
         self.s = settings
         self._snapshot: Snapshot | None = None
         self._task: asyncio.Task | None = None
@@ -68,7 +90,10 @@ class ProjectService:
                 scanned=snap.scanned,
                 pages_fetched=snap.pages_fetched,
                 after_prefilter=snap.after_prefilter,
+                preview_listed=snap.preview_listed,
+                tvl_above_min=snap.tvl_above_min,
                 after_details=len(snap.items),
+                details_fetched=snap.details_fetched,
                 detail_errors=snap.detail_errors,
                 fetched_at=snap.fetched_at,
                 age_seconds=round(time.monotonic() - snap.fetched_monotonic, 1),
@@ -84,9 +109,10 @@ class ProjectService:
             self._snapshot = await self._build_snapshot()
             self._last_error = None
             log.info(
-                "Refresh done in %.1fs: %d projects",
+                "Refresh done in %.1fs: %d projects, %d detail calls",
                 time.monotonic() - started,
                 len(self._snapshot.items),
+                self._snapshot.details_fetched,
             )
         except CoinGeckoError as exc:
             self._last_error = exc
@@ -98,46 +124,90 @@ class ProjectService:
     async def _build_snapshot(self) -> Snapshot:
         rows, pages = await self.client.fetch_market_rows()
         candidates = [row for row in rows if passes_market_filters(row, self.s)]
-        log.info("Scanned %d coins on %d pages, %d candidates", len(rows), pages, len(candidates))
+
+        stored = await asyncio.to_thread(self.store.load_all)
+        now = datetime.now(UTC)
+        to_fetch = [
+            row["id"]
+            for row in candidates
+            if not is_fresh(stored.get(row["id"]), self.s.details_ttl_seconds, now)
+        ]
+        log.info(
+            "Scanned %d coins on %d pages: %d candidates, %d need /coins/{id}",
+            len(rows),
+            pages,
+            len(candidates),
+            len(to_fetch),
+        )
 
         errors = 0
 
-        async def detail_or_none(coin_id: str) -> dict[str, Any] | None:
+        async def fetch_and_store(coin_id: str) -> None:
             nonlocal errors
             try:
-                return await self.client.fetch_detail(coin_id)
+                detail = await self.client.fetch_detail(coin_id)
             except CoinGeckoError as exc:
                 if exc.status == 503:
                     raise  # rate limited even after retries: abort the whole refresh
-                errors += 1
+                errors += 1  # e.g. 404 for a just-delisted coin; an older DB row may still be used
                 log.warning("Skipping %s: %s", coin_id, exc.message)
-                return None
+                return
+            details = parse_details(coin_id, detail, datetime.now(UTC))
+            # Persist each coin as it arrives, so an aborted cold start keeps its progress.
+            await asyncio.to_thread(self.store.upsert, [details])
+            stored[coin_id] = details
 
         # TaskGroup cancels the remaining calls as soon as one raises.
         try:
             async with asyncio.TaskGroup() as tg:
-                tasks = [tg.create_task(detail_or_none(row["id"])) for row in candidates]
+                for coin_id in to_fetch:
+                    tg.create_task(fetch_and_store(coin_id))
         except ExceptionGroup as group:
             raise group.exceptions[0] from None
 
-        items = [
-            to_project(row, detail)
-            for row, task in zip(candidates, tasks, strict=True)
-            if (detail := task.result()) is not None and passes_detail_filters(detail, self.s)
-        ]
-        items.sort(key=lambda p: p.total_volume, reverse=True)
+        combined = combine(candidates, stored, self.s)
         return Snapshot(
-            items=items,
+            items=combined.items,
             scanned=len(rows),
             pages_fetched=pages,
             after_prefilter=len(candidates),
+            preview_listed=combined.preview_listed,
+            tvl_above_min=combined.tvl_above_min,
+            details_fetched=len(to_fetch) - errors,
             detail_errors=errors,
             fetched_at=datetime.now(UTC),
             fetched_monotonic=time.monotonic(),
         )
 
 
-def to_project(row: dict[str, Any], detail: dict[str, Any]) -> Project:
+def parse_details(coin_id: str, detail: dict[str, Any], checked_at: datetime) -> CoinDetails:
+    return CoinDetails(
+        id=coin_id,
+        preview_listing=is_preview_listing(detail),
+        tvl_usd=extract_tvl_usd(detail),
+        checked_at=checked_at,
+    )
+
+
+def combine(
+    candidates: list[dict[str, Any]], details: dict[str, CoinDetails], s: Settings
+) -> Combined:
+    """Join fresh market rows with stored details and apply the detail criteria."""
+    known = [(row, details[row["id"]]) for row in candidates if row["id"] in details]
+    items = [
+        to_project(row, d)
+        for row, d in known
+        if passes_detail_filters(d.preview_listing, d.tvl_usd, s)
+    ]
+    items.sort(key=lambda p: p.total_volume, reverse=True)
+    return Combined(
+        items=items,
+        preview_listed=sum(d.preview_listing for _, d in known),
+        tvl_above_min=sum(tvl_above(d.tvl_usd, s.tvl_min) for _, d in known),
+    )
+
+
+def to_project(row: dict[str, Any], details: CoinDetails) -> Project:
     return Project(
         id=row["id"],
         symbol=row["symbol"],
@@ -150,6 +220,6 @@ def to_project(row: dict[str, Any], detail: dict[str, Any]) -> Project:
         total_volume=row["total_volume"],
         total_supply=row["total_supply"],
         max_supply=row["max_supply"],
-        total_value_locked=extract_tvl_usd(detail),
-        preview_listing=True,
+        total_value_locked=details.tvl_usd,
+        preview_listing=details.preview_listing,
     )

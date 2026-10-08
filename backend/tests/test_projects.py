@@ -1,4 +1,4 @@
-"""ProjectService pipeline and stale-while-revalidate behaviour with a fake client."""
+"""ProjectService pipeline + stale-while-revalidate with a fake client and a temp DB."""
 
 import asyncio
 
@@ -6,6 +6,7 @@ import pytest
 
 from app.config import Settings
 from app.services.coingecko import CoinGeckoError
+from app.services.details_store import DetailsStore
 from app.services.projects import ProjectService
 
 S = Settings(_env_file=None)
@@ -40,22 +41,42 @@ class FakeClient:
         return {"preview_listing": coin_id == "match", "market_data": {"total_value_locked": tvl}}
 
 
-def test_cold_start_503_then_serves_snapshot():
+def make_service(tmp_path, client):
+    store = DetailsStore(tmp_path / "coins.db")
+    store.init()
+    return ProjectService(client, store, S)
+
+
+def test_cold_start_503_then_serves_snapshot(tmp_path):
     async def scenario():
         client = FakeClient()
-        service = ProjectService(client, S)
+        service = make_service(tmp_path, client)
         with pytest.raises(CoinGeckoError) as exc:
             await service.get_projects()  # kicks off the refresh, doesn't wait
         assert exc.value.status == 503
         await service._task
-        response = await service.get_projects()
-        return client, response
+        return client, await service.get_projects()
 
     client, response = asyncio.run(scenario())
     assert sorted(client.detail_calls) == ["gone", "match", "no-preview"]  # "big" prefiltered
     assert [p.id for p in response.items] == ["match"]
     assert response.items[0].total_value_locked == 75_000
-    assert response.meta.scanned == 4
-    assert response.meta.after_prefilter == 3
-    assert response.meta.detail_errors == 1
-    assert not response.meta.stale and not response.meta.refreshing
+    meta = response.meta
+    assert (meta.scanned, meta.after_prefilter, meta.details_fetched) == (4, 3, 2)
+    assert (meta.detail_errors, meta.preview_listed, meta.tvl_above_min) == (1, 1, 1)
+    assert not meta.stale and not meta.refreshing
+
+
+def test_restart_reuses_persisted_details(tmp_path):
+    async def run_once():
+        client = FakeClient()
+        service = make_service(tmp_path, client)  # same DB file each time = a restart
+        service.start_refresh()
+        await service._task
+        return client, await service.get_projects()
+
+    asyncio.run(run_once())
+    client, response = asyncio.run(run_once())
+    assert client.detail_calls == ["gone"]  # failed last time, so never stored
+    assert [p.id for p in response.items] == ["match"]
+    assert response.meta.details_fetched == 0

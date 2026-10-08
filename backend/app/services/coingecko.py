@@ -8,7 +8,6 @@ from typing import Any
 import httpx
 
 from app.config import Settings
-from app.services.cache import TTLCache
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +52,6 @@ class CoinGeckoClient:
         self.s = settings
         self._semaphore = asyncio.Semaphore(settings.concurrency)
         self._limiter = MinIntervalLimiter(settings.min_request_interval)
-        self._details = TTLCache(settings.detail_cache_ttl_seconds)
 
     async def _get(self, path: str, params: dict[str, Any]) -> Any:
         last_error = "unknown error"
@@ -115,9 +113,4 @@ class CoinGeckoClient:
         return list(rows.values()), pages
 
     async def fetch_detail(self, coin_id: str) -> dict[str, Any]:
-        cached = self._details.get(coin_id)
-        if cached is not None:
-            return cached
-        detail = await self._get(f"/coins/{coin_id}", DETAIL_PARAMS)
-        self._details.set(coin_id, detail)
-        return detail
+        return await self._get(f"/coins/{coin_id}", DETAIL_PARAMS)

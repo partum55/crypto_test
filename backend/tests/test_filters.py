@@ -70,9 +70,14 @@ def test_extract_tvl_usd_missing_market_data():
 
 
 def test_detail_filters():
-    assert filters.passes_detail_filters(detail(tvl={"usd": 60_000}), S)
-    assert filters.passes_detail_filters(detail(tvl=60_000), S)
-    assert not filters.passes_detail_filters(detail(tvl={"usd": 50_000}), S)  # strict >
-    assert not filters.passes_detail_filters(detail(tvl=None), S)
-    assert not filters.passes_detail_filters(detail(preview=False, tvl=60_000), S)
-    assert not filters.passes_detail_filters(detail(preview=None, tvl=60_000), S)
+    assert filters.passes_detail_filters(True, 60_000, S)
+    assert not filters.passes_detail_filters(True, 50_000, S)  # strict >
+    assert not filters.passes_detail_filters(True, None, S)
+    assert not filters.passes_detail_filters(False, 60_000, S)
+
+
+def test_is_preview_listing_needs_literal_true():
+    assert filters.is_preview_listing(detail(preview=True))
+    assert not filters.is_preview_listing(detail(preview=False))
+    assert not filters.is_preview_listing(detail(preview=None))
+    assert not filters.is_preview_listing({})
