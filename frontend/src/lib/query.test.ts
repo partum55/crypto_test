@@ -29,6 +29,16 @@ test("max FDV: strict <, null FDV excluded, invalid input ignored", () => {
   assert.equal(filterByMaxFdv(items, parseMaxFdv("abc")).length, 3);
 });
 
+test("max FDV accepts k/M/B shorthand, case-insensitive, with $ and commas", () => {
+  assert.equal(parseMaxFdv("500k"), 500_000);
+  assert.equal(parseMaxFdv("100M"), 100_000_000);
+  assert.equal(parseMaxFdv("1.5b"), 1_500_000_000);
+  assert.equal(parseMaxFdv(" $2.5 m "), 2_500_000);
+  assert.equal(parseMaxFdv("1,500K"), 1_500_000);
+  assert.equal(parseMaxFdv(".5M"), 500_000);
+  for (const bad of ["1.5x", "M", "1e9", "1.2.3", "5MM", "-5k"]) assert.equal(parseMaxFdv(bad), null, bad);
+});
+
 test("sort copies, both directions, nulls last", () => {
   const before = items.map((x) => x.id);
   assert.deepEqual(sortProjects(items, "market_cap", "desc").map((x) => x.id), ["btc", "eth", "x"]);

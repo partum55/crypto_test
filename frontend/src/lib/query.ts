@@ -9,12 +9,15 @@ export function filterByName(items: Project[], query: string): Project[] {
   );
 }
 
-/** USD amount from user input; null (= no filter) for empty, invalid or negative input. */
+const SUFFIX: Record<string, number> = { "": 1, k: 1e3, m: 1e6, b: 1e9 };
+
+/**
+ * USD amount from user input, with optional k/M/B shorthand ("500k", "1.5B", "$2,000,000").
+ * null (= no filter) for empty, invalid or negative input.
+ */
 export function parseMaxFdv(input: string): number | null {
-  const s = input.replace(/[,\s_]/g, "");
-  if (!s) return null;
-  const n = Number(s);
-  return Number.isFinite(n) && n >= 0 ? n : null;
+  const m = input.replace(/[,\s_$]/g, "").match(/^(\d*\.?\d+)([kmb]?)$/i);
+  return m ? Number(m[1]) * SUFFIX[m[2].toLowerCase()] : null;
 }
 
 /** Keeps projects with FDV strictly below max. Null FDV is excluded while the filter is active. */

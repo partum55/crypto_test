@@ -25,7 +25,15 @@ export type Meta = {
   fetched_at: string; // ISO datetime
   stale?: boolean;
   refreshing?: boolean;
+  /** Progress of a running scan (optional). */
+  progress?: { checked: number; total: number };
+  /** Echo of ?require_preview; false = preview_listing rule skipped (optional). */
+  require_preview?: boolean;
+  /** Pipeline steps in order; `passed` is cumulative (coins left after the step). Optional. */
+  funnel?: FunnelStep[];
 };
+
+export type FunnelStep = { key: string; label: string; passed: number };
 
 export type ProjectsResponse = {
   count: number;

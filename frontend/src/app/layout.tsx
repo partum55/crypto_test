@@ -1,15 +1,15 @@
 import type { Metadata } from "next";
-import { Schibsted_Grotesk } from "next/font/google";
+import { Public_Sans } from "next/font/google";
 import "./globals.css";
 
-const sans = Schibsted_Grotesk({
-  variable: "--font-schibsted",
+const sans = Public_Sans({
+  variable: "--font-public-sans",
   subsets: ["latin"],
 });
 
 export const metadata: Metadata = {
-  title: "Crypto projects",
-  description: "Coins that pass the market criteria, with search, FDV filter and sorting.",
+  title: "Low-cap crypto screen",
+  description: "Coins from CoinGecko that pass six strict filters, with search, FDV limit and sorting.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

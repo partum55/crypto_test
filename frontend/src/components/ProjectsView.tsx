@@ -2,12 +2,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { ApiError, fetchProjects } from "@/lib/api";
-import { formatTime } from "@/lib/format";
 import { filterByMaxFdv, filterByName, parseMaxFdv, sortProjects } from "@/lib/query";
+import { getPhase } from "@/lib/status";
 import type { ProjectsResponse, SortDir, SortKey } from "@/lib/types";
-import Controls from "@/components/Controls";
+import Controls, { PreviewToggle } from "@/components/Controls";
+import Funnel from "@/components/Funnel";
 import ProjectsTable from "@/components/ProjectsTable";
-import StatusBanner from "@/components/StatusBanner";
+import StatusBanner, { EmptyAfterFilters, EmptyFromBackend, StatusPill } from "@/components/StatusBanner";
 
 const POLL_MS = 5_000;
 
@@ -20,8 +21,10 @@ export default function ProjectsView() {
   const [maxFdv, setMaxFdv] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("market_cap");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  // Default true = the spec. Component state only; not persisted.
+  const [requirePreview, setRequirePreview] = useState(true);
 
-  // One fetch loop per mount/retry. Polls while the backend is refreshing or warming up (503).
+  // One fetch loop per mount/retry. Polls while the backend is refreshing or warming up (503 "warming").
   // Cleanup aborts the request and the pending timer, so StrictMode's double mount leaves one loop.
   useEffect(() => {
     const ctrl = new AbortController();
@@ -29,7 +32,7 @@ export default function ProjectsView() {
 
     const load = async () => {
       try {
-        const res = await fetchProjects(ctrl.signal);
+        const res = await fetchProjects(ctrl.signal, requirePreview);
         setData(res);
         setError(null);
         if (res.meta.refreshing) timer = setTimeout(load, POLL_MS);
@@ -37,7 +40,7 @@ export default function ProjectsView() {
         if (ctrl.signal.aborted) return;
         const e = err instanceof ApiError ? err : new ApiError("Something went wrong while loading projects.");
         setError(e);
-        if (e.status === 503) timer = setTimeout(load, POLL_MS);
+        if (e.warming) timer = setTimeout(load, POLL_MS);
       }
     };
 
@@ -46,7 +49,7 @@ export default function ProjectsView() {
       ctrl.abort();
       clearTimeout(timer);
     };
-  }, [reloadKey]);
+  }, [reloadKey, requirePreview]);
 
   const items = useMemo(() => data?.items ?? [], [data]);
   const fdvLimit = parseMaxFdv(maxFdv);
@@ -55,25 +58,67 @@ export default function ProjectsView() {
     [items, query, fdvLimit, sortKey, sortDir],
   );
 
+  const phase = getPhase(data, error);
+  const meta = data?.meta ?? null;
+  const settled = data !== null && phase !== "scanning";
+
   const retry = () => {
     setError(null);
     setReloadKey((k) => k + 1);
+  };
+  // A different result set: drop the old one so it is never shown under the wrong label.
+  const changeRequirePreview = (v: boolean) => {
+    setData(null);
+    setError(null);
+    setRequirePreview(v);
   };
   const clearFilters = () => {
     setQuery("");
     setMaxFdv("");
   };
+  // Header click: same column flips direction, a new column starts high to low.
+  const sortBy = (key: SortKey) => {
+    if (key === sortKey) setSortDir(sortDir === "asc" ? "desc" : "asc");
+    else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  };
+
+  let empty = null;
+  if (phase === "error" && !data)
+    empty = <p className="text-muted">No data yet. Projects appear here once the backend responds.</p>;
+  else if (settled && items.length === 0) empty = (
+      <EmptyFromBackend
+        meta={{ ...data.meta, require_preview: requirePreview }}
+        toggle={<PreviewToggle id="preview-empty" requirePreview={requirePreview} onChange={changeRequirePreview} />}
+      />
+    );
+  else if (settled && visible.length === 0)
+    empty = <EmptyAfterFilters total={items.length} query={query} fdvLimit={fdvLimit} onClear={clearFilters} />;
 
   return (
-    <main className="mx-auto max-w-6xl px-4 py-8 sm:px-8 sm:py-12">
-      <header className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
-        <h1 className="text-3xl font-semibold tracking-tight">Crypto projects</h1>
-        {data && (
-          <p className="text-sm text-muted">
-            {visible.length} of {items.length} shown, updated {formatTime(data.meta.fetched_at)}
-          </p>
-        )}
+    <main className="mx-auto max-w-6xl px-4 py-8 sm:px-8 sm:py-14">
+      <header>
+        <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
+          <h1 className="text-[28px] leading-tight font-bold tracking-[-0.01em] sm:text-4xl">Low-cap crypto screen</h1>
+          <StatusPill phase={phase} meta={meta} />
+        </div>
+        <p className="mt-3 max-w-[60ch] text-muted">
+          Coins from CoinGecko that pass six strict filters, shown step by step below. Usually only a handful pass,
+          and often none.
+        </p>
       </header>
+
+      <StatusBanner
+        phase={phase}
+        error={error}
+        fetchedAt={data ? meta?.fetched_at : undefined}
+        requirePreview={requirePreview}
+        onRetry={retry}
+      />
+
+      <Funnel meta={meta} scanning={phase === "scanning"} requirePreview={requirePreview} />
 
       <Controls
         query={query}
@@ -85,17 +130,19 @@ export default function ProjectsView() {
         onSortKey={setSortKey}
         sortDir={sortDir}
         onSortDir={setSortDir}
+        disabled={!settled || items.length === 0}
+        shown={settled && items.length > 0 ? `${visible.length} of ${items.length} shown` : null}
+        requirePreview={requirePreview}
+        onRequirePreview={changeRequirePreview}
       />
 
-      <StatusBanner
-        data={data}
-        error={error}
-        visibleCount={visible.length}
-        onRetry={retry}
-        onClearFilters={clearFilters}
+      <ProjectsTable
+        rows={settled ? visible : null}
+        sortKey={sortKey}
+        sortDir={sortDir}
+        onSort={sortBy}
+        empty={empty}
       />
-
-      {visible.length > 0 && <ProjectsTable items={visible} sortKey={sortKey} sortDir={sortDir} />}
     </main>
   );
 }

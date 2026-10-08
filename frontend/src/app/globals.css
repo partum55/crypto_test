@@ -1,14 +1,18 @@
 @import "tailwindcss";
 
+/* Colour carries meaning: amber = in progress, red = real failure, blue = interactive. */
 @theme inline {
-  --color-paper: #eef1f4;
-  --color-ink: #14213d;
-  --color-muted: #5b6b82;
-  --color-rule: #c9d2dd;
-  --color-accent: #2a6f97;
-  --color-signal: #b7791f;
-  --color-error: #b3261e;
-  --font-sans: var(--font-schibsted), system-ui, sans-serif;
+  --color-paper: #eef1f4; /* page background */
+  --color-surface: #ffffff; /* inputs and table body */
+  --color-ink: #16213a; /* text, funnel bars, primary button */
+  --color-muted: #4f5d74; /* secondary text, labels, hints */
+  --color-rule: #c6cfdb; /* dividers, skeletons (non-text) */
+  --color-line: #7a8699; /* input borders (>= 3:1 on surface and paper) */
+  --color-accent: #1f5f8b; /* focus ring, active sort, interactive */
+  --color-signal: #8a5a00; /* warming / refreshing text and progress */
+  --color-signal-dot: #e0a100; /* status dot next to signal text */
+  --color-error: #b3261e; /* real failures only */
+  --font-sans: var(--font-public-sans), system-ui, sans-serif;
 }
 
 body {
@@ -20,4 +24,13 @@ body {
 :focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }

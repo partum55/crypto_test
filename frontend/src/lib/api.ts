@@ -10,12 +10,18 @@ export class ApiError extends Error {
   ) {
     super(message);
   }
+
+  /** The backend has no snapshot yet (cold start). Expected, not a failure. */
+  get warming(): boolean {
+    return this.status === 503 && /warm/i.test(this.message);
+  }
 }
 
-export async function fetchProjects(signal: AbortSignal): Promise<ProjectsResponse> {
+/** requirePreview=false asks the backend to skip only the preview_listing rule (a deviation from the spec). */
+export async function fetchProjects(signal: AbortSignal, requirePreview = true): Promise<ProjectsResponse> {
   let res: Response;
   try {
-    res = await fetch(`${API_URL}/api/projects`, {
+    res = await fetch(`${API_URL}/api/projects${requirePreview ? "" : "?require_preview=false"}`, {
       signal: AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]),
       cache: "no-store",
     });
@@ -33,7 +39,7 @@ export async function fetchProjects(signal: AbortSignal): Promise<ProjectsRespon
     throw new ApiError(detail, res.status);
   }
   const body = await res.json().catch(() => null);
-  if (!Array.isArray(body?.items) || typeof body?.meta !== "object") {
+  if (!Array.isArray(body?.items) || !body.meta || typeof body.meta !== "object") {
     throw new ApiError("Backend sent an unexpected response.", res.status);
   }
   return body as ProjectsResponse;
