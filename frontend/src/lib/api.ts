@@ -32,5 +32,9 @@ export async function fetchProjects(signal: AbortSignal): Promise<ProjectsRespon
     const detail = typeof body?.detail === "string" ? body.detail : `HTTP ${res.status}`;
     throw new ApiError(detail, res.status);
   }
-  return res.json();
+  const body = await res.json().catch(() => null);
+  if (!Array.isArray(body?.items) || typeof body?.meta !== "object") {
+    throw new ApiError("Backend sent an unexpected response.", res.status);
+  }
+  return body as ProjectsResponse;
 }
