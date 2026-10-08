@@ -59,7 +59,7 @@ npm run dev                   # http://localhost:3000 (the backend's CORS allows
 | Where | Command | What it covers |
 |---|---|---|
 | backend | `uv run pytest` | 43 tests, no network (fake clients, temp SQLite DB) |
-| backend | `uv run ruff check .` | lint |
+| backend | `uv run ruff check .` / `uv run ruff format --check .` | lint / formatting |
 | frontend | `npm test` | 10 tests on the pure logic in `src/lib` (`node:test`, no extra deps) |
 | frontend | `npm run lint` / `npm run build` | ESLint / production build (incl. type check) |
 
@@ -196,7 +196,7 @@ The UI explains this in the empty state and names the step where the count hits 
 - `meta.funnel` is cumulative: coins left after each step.
 - `meta.after_details` is always the strict count (all six criteria), even with `require_preview=false`.
 - `503` means the cache is warming up, or CoinGecko kept rate-limiting; it comes with `detail` and `Retry-After`. `502` means CoinGecko failed.
-- CORS allows `http://localhost:3000` (`CORS_ORIGINS`).
+- CORS allows `http://localhost:3000`. To serve the frontend elsewhere, set e.g. `CORS_ORIGINS=["http://localhost:3001"]` (a JSON list) in `backend/.env`.
 
 ### `GET /api/projects/{coin_id}?days=1|7|30`
 
@@ -252,6 +252,12 @@ The UI explains this in the empty state and names the step where the count hits 
 ## AI workflow
 
 Built with Claude Code (Claude Opus 5.5). I wrote the briefs and reviewed plans and results. The AI planned, generated the code and ran the checks. Backend and frontend were built in parallel sessions against an agreed contract.
+
+**My follow-up requests** (design changes I asked for after reviewing a result):
+- Persist coin details in SQLite instead of an in-memory cache, so restarts take ~10 s instead of ~8 min.
+- `require_preview` and `meta.funnel`, so an empty strict result can be explained and the rest of the pipeline inspected.
+- The coin detail endpoint, allow-listed to scanned ids so it can't proxy arbitrary CoinGecko lookups.
+- One typed contract on both sides, after the first detail response drifted from what the frontend expected.
 
 **Verified against the real API before coding:**
 - `preview_listing` is top-level.
