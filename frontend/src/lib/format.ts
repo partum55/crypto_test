@@ -37,3 +37,16 @@ export function formatTime(iso: string | null | undefined): string {
     ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
     : "—";
 }
+
+const compactNum = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
+
+/** 1.2B style, for supplies (no currency). */
+export const formatCompact = (v: number | null | undefined) => (isNum(v) ? compactNum.format(v) : "—");
+
+/** Chart timestamp: time of day for a 1-day range, date and time otherwise. Client only. */
+export function formatChartDate(ms: number, days: number): string {
+  const d = new Date(ms);
+  return days <= 1
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}

@@ -1,3 +1,5 @@
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import { formatPrice, formatUsdCompact } from "@/lib/format";
 import type { Project, SortDir, SortKey } from "@/lib/types";
@@ -8,6 +10,8 @@ type Props = {
   sortKey: SortKey;
   sortDir: SortDir;
   onSort: (key: SortKey) => void;
+  /** Coin page URL (carries the list state so "back" restores it). */
+  detailHref: (id: string) => string;
   /** Shown below the header instead of rows; kept outside the scroll box so it wraps on mobile. */
   empty?: ReactNode;
 };
@@ -25,7 +29,8 @@ const SKELETON_ROWS = 5;
 const firstCol = "sticky left-0 z-10 bg-surface py-3 px-4 text-left max-sm:border-r max-sm:border-rule";
 const cell = "py-3 px-4 text-right";
 
-export default function ProjectsTable({ rows, sortKey, sortDir, onSort, empty }: Props) {
+export default function ProjectsTable({ rows, sortKey, sortDir, onSort, detailHref, empty }: Props) {
+  const router = useRouter();
   return (
     <div className="mt-6 border border-rule bg-surface">
       <div className="overflow-x-auto">
@@ -82,7 +87,14 @@ export default function ProjectsTable({ rows, sortKey, sortDir, onSort, empty }:
                     </tr>
                   ))
                 : rows.map((p) => (
-                    <tr key={p.id} className="border-b border-rule last:border-0">
+                    <tr
+                      key={p.id}
+                      // Mouse convenience: the whole row opens the coin. Keyboard users get the real link in the name cell.
+                      onClick={(e) => {
+                        if (!(e.target as HTMLElement).closest("a")) router.push(detailHref(p.id));
+                      }}
+                      className="group cursor-pointer border-b border-rule last:border-0 hover:bg-paper/60"
+                    >
                       <th scope="row" className={`${firstCol} font-normal`}>
                         <span className="flex items-center gap-3">
                           {p.image ? (
@@ -92,7 +104,12 @@ export default function ProjectsTable({ rows, sortKey, sortDir, onSort, empty }:
                           ) : (
                             <span className="size-6 rounded-full bg-rule" aria-hidden />
                           )}
-                          <span className="font-semibold whitespace-nowrap">{p.name}</span>
+                          <Link
+                            href={detailHref(p.id)}
+                            className="rounded font-semibold whitespace-nowrap group-hover:underline focus-visible:underline"
+                          >
+                            {p.name}
+                          </Link>
                           <span className="text-sm text-muted uppercase">{p.symbol}</span>
                         </span>
                       </th>

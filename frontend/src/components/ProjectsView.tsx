@@ -1,7 +1,9 @@
 "use client";
 
+import { useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { ApiError, fetchProjects } from "@/lib/api";
+import { listStateToQuery, readListState } from "@/lib/listState";
 import { filterByMaxFdv, filterByName, parseMaxFdv, sortProjects } from "@/lib/query";
 import { getPhase } from "@/lib/status";
 import type { ProjectsResponse, SortDir, SortKey } from "@/lib/types";
@@ -17,12 +19,22 @@ export default function ProjectsView() {
   const [error, setError] = useState<ApiError | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
-  const [query, setQuery] = useState("");
-  const [maxFdv, setMaxFdv] = useState("");
-  const [sortKey, setSortKey] = useState<SortKey>("market_cap");
-  const [sortDir, setSortDir] = useState<SortDir>("desc");
-  // Default true = the spec. Component state only; not persisted.
-  const [requirePreview, setRequirePreview] = useState(true);
+  // Search/sort/toggle start from the URL, so coming back from a coin page restores them.
+  const searchParams = useSearchParams();
+  const [initial] = useState(() => readListState(searchParams));
+  const [query, setQuery] = useState(initial.query);
+  const [maxFdv, setMaxFdv] = useState(initial.maxFdv);
+  const [sortKey, setSortKey] = useState<SortKey>(initial.sortKey);
+  const [sortDir, setSortDir] = useState<SortDir>(initial.sortDir);
+  // Default true = the spec.
+  const [requirePreview, setRequirePreview] = useState(initial.requirePreview);
+
+  // Mirror the state into the URL without a navigation (Next keeps useSearchParams in sync).
+  const listQuery = listStateToQuery({ query, maxFdv, sortKey, sortDir, requirePreview });
+  useEffect(() => {
+    const url = listQuery ? `?${listQuery}` : window.location.pathname;
+    if (window.location.search !== (listQuery ? `?${listQuery}` : "")) window.history.replaceState(null, "", url);
+  }, [listQuery]);
 
   // One fetch loop per mount/retry. Polls while the backend is refreshing or warming up (503 "warming").
   // Cleanup aborts the request and the pending timer, so StrictMode's double mount leaves one loop.
@@ -141,6 +153,7 @@ export default function ProjectsView() {
         sortKey={sortKey}
         sortDir={sortDir}
         onSort={sortBy}
+        detailHref={(id) => `/coins/${encodeURIComponent(id)}${listQuery ? `?${listQuery}` : ""}`}
         empty={empty}
       />
     </main>

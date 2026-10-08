@@ -41,5 +41,20 @@ export type ProjectsResponse = {
   meta: Meta;
 };
 
+/** GET /api/projects/{id}?days=N */
+export type CoinDetail = {
+  project: Project;
+  /** The six rules in backend order, with whether this coin passes each. */
+  passes: RuleCheck[];
+  /** null when the chart couldn't be fetched; the reason is in chart_error. */
+  chart: PriceChart | null;
+  chart_error: string | null;
+};
+
+export type RuleCheck = { key: string; label: string; passed: boolean };
+
+/** [unix ms, value] pairs, as in CoinGecko's market_chart. */
+export type PriceChart = { days: number; prices: [number, number][]; total_volumes?: [number, number][] };
+
 export type SortKey = "market_cap" | "total_volume";
 export type SortDir = "asc" | "desc";
