@@ -9,62 +9,100 @@ npm install
 npm run dev                  # http://localhost:3000 (backend CORS allows this origin)
 ```
 
-Checks: `npm run lint`, `npm test` (pure query functions, `node:test`, no extra deps), `npm run build`.
+Checks: `npm run lint`, `npm test` (pure functions in `src/lib`, `node:test`, no extra deps), `npm run build`.
 
 `NEXT_PUBLIC_API_URL` is inlined at build time, so set it before `npm run build`.
 
 ## Features
 
 - Lists projects from `GET {NEXT_PUBLIC_API_URL}/api/projects`. The browser calls only our backend. Coin logos are static images on CoinGecko's CDN, not API calls.
-- Search: trimmed, case-insensitive substring match on name **or symbol** (`eth` → Ethereum).
-- Max FDV filter in USD: strict `<`. Projects with null FDV are hidden while the filter is on. Empty input means no filter. Invalid or negative input is ignored and an inline hint says so. Commas and spaces are allowed (`1,000,000`), and so is JS number syntax such as `1e9`.
-- Sort by market cap or 24h volume, both directions. Sorting works on a copy, and nulls always go last.
-- States:
-  - loading
-  - error with Retry. 502/503 show the backend `detail`. If the backend is down: "Backend is not reachable at <url>". Requests time out after 30 s.
-  - backend refreshing or stale
-  - backend returned 0 projects, explained with `meta` (scanned / after_prefilter / after_details)
-  - 0 left after local filters, with a Clear filters button
+- **Screening funnel** (`meta.funnel`): how many coins are left after each step, as proportional bars.
+- **Search:** trimmed, case-insensitive substring match on name **or symbol** (`eth` → Ethereum).
+- **Max FDV**, in USD:
+  - accepts shorthand: `500k`, `100M`, `1.5B`, `$2.5m`, `1,000,000` (case-insensitive; `$`, commas and spaces are ignored)
+  - strict `<`
+  - projects with null FDV are hidden while the limit is on
+  - empty input means no limit; invalid or negative input is ignored and the hint says so
+  - the hint repeats the parsed value in full ("Under $50,000,000")
+- **Sort** by market cap or 24h volume, both directions, from the toolbar or by clicking the column headers. Both stay in sync and `aria-sort` is kept. Sorting works on a copy, and nulls always go last.
+- **Toggle "Ignore preview-listing requirement (deviates from spec)"**: off by default and kept in component state only. It appears in the toolbar, and in the empty state when the strict result is 0. Turning it on refetches with `?require_preview=false`, so the backend skips only the preview-listing rule. A notice then says the list deviates from the spec, and the funnel shows the preview step as "Ignored".
 
-## Assumptions and decisions
+## Why the strict result is 0
 
-- **Filtering/sorting on the client.** The backend owns the 6 required criteria. The UI owns user-driven refinements on a small list (`useMemo` over pure functions in `src/lib/query.ts`), so there are no extra round-trips and no extra backend params.
-- **Polling.** One `useEffect` loop per mount or retry. While `meta.refreshing` is true it re-fetches every 5 s and stops when it turns false. It does the same on **503**, because the backend answers 503 "Data is warming up" before its first snapshot exists. The cleanup aborts the in-flight request (`AbortController`) and clears the timer, so React StrictMode's double mount leaves one loop.
-- If a poll fails after data has loaded, the last data stays visible under the error.
-- Numbers are typed `number | null` and render as "—" when missing. `stale`, `refreshing` and `cached` are optional.
-- Time (`fetched_at`) is only rendered after the client fetch, so there's no server/client hydration mismatch.
-- Plain `<img>` for logos instead of `next/image` (avoids `remotePatterns` config).
-- Design: one font (Schibsted Grotesk, self-hosted by `next/font` at build time), cool light palette, and controls written as one sentence ("Show projects matching … with FDV under $… by …"). Tabular figures in the table.
+On the live data: 2,747 coins scanned → 685 pass the market filters → 107 have TVL > $50k → **0** have `preview_listing = true`.
 
-## Contract vs. current backend (`backend/app/schemas.py`)
+Preview listings on CoinGecko are pre-launch tokens: they aren't trading yet, so they have no real 24h volume, and usually no TVL or a full supply either. The spec asks for a preview-listed coin that *also* has volume > $50k and TVL > $50k, and these conditions almost never hold together. An empty list is therefore the expected, correct answer, not a bug. The UI says this and shows the funnel step where the count drops to 0. The toggle lets a reviewer see the 107 coins that pass the other five rules, clearly labelled as a deviation.
 
-- `meta.cached` is not sent. The UI doesn't use it.
-- The backend also sends `coingecko_url`, `meta.detail_errors`, `age_seconds` and `last_error`. These are ignored and not typed.
-- The backend returns 503 + `Retry-After: 30` until its first snapshot is ready. The UI handles this with the auto-retry described above.
+## Design decisions
+
+- **Direction: "the screen is the explanation."** The funnel at the top is the one prominent element and stays in every state. During warm-up it shows skeleton bars or scan progress, for an empty result it shows where coins drop out, and with data it puts the short list in context. Bar length is linear in the count (relative to coins scanned) so the bars stay honest; zero is drawn as a baseline tick, not a missing bar.
+- **Labelled toolbar instead of the sentence-style controls.** A sentence made of inputs and selects depends on inline wrapping of controls whose widths vary by font, value and viewport. It broke with a lone "," and orphaned selects. A labelled grid (search / max FDV / sort, then the toggle) is predictable, scans faster and stacks cleanly at 375 px.
+- **Colour carries meaning only.**
+  - ink `#16213A`: text and bars
+  - muted `#4F5D74`: secondary text
+  - paper `#EEF1F4` / surface `#FFF`: page and inputs/table
+  - rule `#C6CFDB`: dividers and skeletons
+  - line `#7A8699`: input borders, ≥ 3:1
+  - accent `#1F5F8B`: focus, active sort
+  - signal `#8A5A00` (dot `#E0A100`): warming, refreshing, progress
+  - error `#B3261E`: real failures only
+
+  All text pairs are ≥ 5.2:1 (WCAG AA).
+- **Type:** Public Sans via `next/font` (self-hosted at build). I switched from Schibsted Grotesk because its tabular figures also make commas and periods fixed-width ("2 , 750"). Scale: 12/14/16/20/28–36. Numbers are right-aligned with `tabular-nums`.
+- **Motion:** only the status dot pulses and the progress bar animates. Both are disabled under `prefers-reduced-motion`. Skeletons are static.
+- **States:**
+  - **Loading:** "Connecting to backend". Skeleton funnel, plus table header with 5 skeleton rows, so nothing jumps when data arrives. Controls are disabled.
+  - **Warming** (503 whose `detail` contains "warming"): amber "Warming up" and a neutral note. No red and no Retry; it auto-retries every 5 s.
+  - **Scanning** (200 + `refreshing` + 0 items): the empty verdict is held back, and the last funnel step shows `meta.progress` ("Checked 340 of 692 candidates").
+  - **Refreshing** (data + `refreshing`): table stays; status reads "Refreshing, 120 of 692 checked".
+  - **Error** (unreachable, timeout, 502, non-warming 503): red block with the message and **Retry**, and status "Not updating". Earlier data stays visible with "Showing data from HH:MM". With no data, the table says so instead of showing skeletons that would look like loading.
+  - **Empty from backend:** the steps from `meta.funnel` with the zero step in bold, a sentence naming where the count hit 0 and why, and the toggle.
+  - **Empty after your filters:** "None of the 4 projects match “zzz” and have FDV under $5M." plus **Clear filters**.
+  - **Mobile:** the table scrolls inside its own frame with a sticky Project column; the page never scrolls sideways.
+- Phase logic (`src/lib/status.ts`) and the funnel bottleneck are pure functions with unit tests.
+
+## Other assumptions
+
+- **Filtering/sorting on the client.** The backend owns the required criteria (and the preview toggle, since it needs data the client doesn't have). The UI owns user-driven refinements on a short list (`useMemo` over pure functions in `src/lib/query.ts`), so there are no extra round-trips.
+- **Polling.** One `useEffect` loop per mount, retry or toggle change. It re-fetches every 5 s while `meta.refreshing` is true or while warming. The cleanup aborts the request and clears the timer, so React StrictMode's double mount leaves one loop.
+- Numbers are typed `number | null` and render as "—". `stale`, `refreshing`, `cached`, `progress`, `funnel` and `require_preview` are optional. Without `funnel`, the UI falls back to `scanned` / `after_prefilter` / `after_details`.
+- Time (`fetched_at`) is only rendered after the client fetch, so there's no hydration mismatch.
+
+## Contract notes for the backend
+
+- `meta.funnel` is consumed as an ordered array `[{key, label, passed}]`, with `passed` cumulative. Labels are shown verbatim. `preview_listing = true` reads technical; a label such as "On CoinGecko's preview listing" would read better.
+- `meta.progress: {checked, total}` is optional and rendered when present. The backend doesn't send it yet.
+- A 503 is treated as warm-up only when `detail` contains "warming". Other 503s are real errors with Retry.
+- `meta.cached` is not sent. Extra fields (`coingecko_url`, `detail_errors`, `age_seconds`, `last_error`, `preview_listed`, `tvl_above_min`, …) are ignored.
 
 ## Limitations
 
-- No dark mode, no pagination or virtualization (the list is small), and filters aren't kept in the URL.
+- No dark mode, no pagination or virtualization (the list is at most about 100 rows), and filters and the toggle aren't kept in the URL.
+- After the toggle in the empty state is clicked, the empty state is replaced by results, so keyboard focus returns to the page. The toolbar toggle shows the new state.
 - `NEXT_PUBLIC_API_URL` is fixed at build time.
 
 ## Next steps
 
-- Persist search, FDV and sort in query params.
+- Keep search, FDV, sort and the toggle in query params.
 - Show `meta.last_error` when a background refresh fails.
-- Sortable column headers, a link to `coingecko_url`, and component tests (e.g. Playwright) for the states.
+- Link rows to `coingecko_url`, and add Playwright component tests for the states (the screenshot script below is a manual check, not shipped).
 
 ## AI workflow
 
-- **Generated:** the scaffold (create-next-app), `lib/` (types, api, query, format, test), the four components, and these notes. All written with Claude Code from the agreed contract.
+- **Generated:**
+  - v1: scaffold, `lib/`, components.
+  - v2 (this redesign): design proposal, Funnel, toolbar, phase logic, preview toggle, NOTES.
+  - All written with Claude Code.
 - **Verified:**
-  - lint, `npm test`, `npm run build`, and `tsc`.
-  - Playwright run against `next dev`:
-    - backend blocked: "not reachable" error, then Retry loads data
-    - real backend warming (503) and then live: real data returned 0 projects, and the empty state shows its meta numbers
-    - mocked responses: 503 → auto-retry; `refreshing` polling every 5 s, stopping when it turns false (one loop under StrictMode); both sorts in both directions with nulls last; search `  ETH `; FDV strict `<`; invalid and negative FDV ignored; filtered-empty + Clear filters
-    - 375 px width with no horizontal page scroll
-  - Network: requests only to `localhost:3000` and `localhost:8000`.
-- **Corrected:**
-  - `node --test <dir>` didn't pick up `.ts` files. Switched to a glob and enabled `allowImportingTsExtensions`.
-  - Tabular figures spaced out the header time, so they're limited to the table.
-  - Read the backend and found the 503 warm-up response, so 503 now triggers auto-retry.
+  - lint, `npm test` (7 tests: search, FDV strict `<` and shorthand, sort, phases, funnel bottleneck), `npm run build`.
+  - A Playwright script outside the repo (mocks live only there) took screenshots at 1280 and 375 px of: loading, warming, scanning + progress, refreshing + progress, error unreachable, 502 with earlier data, empty from backend with funnel, empty without funnel, toggle on, empty after filters, data + header-click sort, keyboard focus. I looked at each one. The page never scrolls sideways at 375 px.
+  - Against the live backend: strict result 0 with the real funnel, the toggle requests `?require_preview=false` and shows 107 rows, and requests go only to `localhost:8000` (plus the logo CDN).
+- **Corrected after looking at screenshots:**
+  - Sort selects overflowed by 183 px (`w-full` beat `w-auto`).
+  - Funnel bars were centred on multi-line labels.
+  - Schibsted's tabular punctuation, so I switched to Public Sans.
+  - Wrapped sort headers on mobile.
+  - Disabled selects looked enabled.
+  - Skeleton rows during an error looked like loading.
+  - The funnel path in the empty state wrapped mid-step.
+  - The first mock for "502 with data" was wrong: StrictMode's aborted request used up the data response.
