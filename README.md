@@ -11,7 +11,7 @@ A FastAPI backend that scans CoinGecko and returns the coins matching **all** of
 | `preview_listing == true` | `/coins/{id}` top-level `preview_listing` | `is True` |
 | TVL > $50k | `/coins/{id}` `market_data.total_value_locked` | strict `>` (USD) |
 
-The frontend (TODO) will call only this backend, never CoinGecko directly.
+The Next.js frontend (`frontend/`) calls only this backend, never CoinGecko directly.
 
 ## Run the backend
 
@@ -40,6 +40,16 @@ On startup the server **warms its cache in the background**. Until that first re
 | Restart / later refreshes (details < 6h old) | 11 market pages + only new or stale coins | **~10 s** (9.7 s measured; 4 detail calls) |
 
 Coin details are stored in `backend/data/coins.db` (SQLite, gitignored). Delete that file to force a full re-check.
+
+## Run the frontend
+
+```bash
+cd frontend
+npm install
+npm run dev    # http://localhost:3000, expects the backend on :8000
+```
+
+Details, features and design decisions are in [`frontend/NOTES.md`](frontend/NOTES.md).
 
 ## API
 
@@ -145,10 +155,9 @@ Of the 685 market-filtered candidates, **none** has `preview_listing == true`, r
 - [x] SQLite persistence for coin details: fast restarts, and only stale or new coins are re-checked
 - [x] `meta.funnel` (cumulative per-criterion counts) and `require_preview` query param (documented deviation)
 - [x] Unit tests (no network; temp DB) for the filters, the client's paging/retries, the store, the combine/select/funnel steps, the service pipeline including the restart path, and the query param
-- [ ] Frontend: TODO in this backend session (see `frontend/NOTES.md`)
+- [x] Frontend: Next.js app with a screening funnel, search, sorting and a preview-listing toggle (see `frontend/NOTES.md`)
 
 ## Next steps
 
-- Build the frontend: table, loading/warming state driven by `503` + `Retry-After`, and an empty state that shows `meta` counts.
 - Periodic background refresh, so the cache is never stale when a request comes in.
 - Find a known preview-listed coin to settle the open question above. If preview coins are missing from `/coins/markets`, discover them another way, e.g. diff `/coins/list` against market ids and check the leftovers via `/coins/{id}`. Their market fields would likely be empty, though.
