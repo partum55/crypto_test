@@ -25,7 +25,33 @@ Checks: `npm run lint`, `npm test` (pure functions in `src/lib`, `node:test`, no
   - empty input means no limit; invalid or negative input is ignored and the hint says so
   - the hint repeats the parsed value in full ("Under $50,000,000")
 - **Sort** by market cap or 24h volume, both directions, from the toolbar or by clicking the column headers. Both stay in sync and `aria-sort` is kept. Sorting works on a copy, and nulls always go last.
-- **Toggle "Ignore preview-listing requirement (deviates from spec)"**: off by default and kept in component state only. It appears in the toolbar, and in the empty state when the strict result is 0. Turning it on refetches with `?require_preview=false`, so the backend skips only the preview-listing rule. A notice then says the list deviates from the spec, and the funnel shows the preview step as "Ignored".
+- **Toggle "Ignore preview-listing requirement (deviates from spec)"**: off by default and stored in the URL (`preview=ignore`) like the rest of the list state. It appears in the toolbar, and in the empty state when the strict result is 0. Turning it on refetches with `?require_preview=false`, so the backend skips only the preview-listing rule. A notice then says the list deviates from the spec, and the funnel shows the preview step as "Ignored".
+
+- **List state in the URL:** `q`, `fdv`, `sort`, `dir` and `preview=ignore`, with defaults left out (`src/lib/listState.ts`, tested). The state is read from the URL once on mount and kept in local state, so typing doesn't lag. Changes are written back with `window.history.replaceState`, which Next keeps in sync with `useSearchParams`. Coming back from a coin page (back link or browser Back) restores search, FDV, sort and the toggle.
+- **Opening a coin:** the name cell holds a real `<Link>` (Tab to it, Enter opens the coin). For mouse users, a click anywhere on the row does the same. The link carries the list's query string to the coin page.
+
+## Coin page (`/coins/[id]`)
+
+- **Route:** `src/app/coins/[id]/page.tsx` renders `<CoinDetail />` inside `<Suspense>`. With `cacheComponents`, `useParams()` / `useSearchParams()` for an id that isn't known at build time must sit under Suspense, otherwise the build fails. The fallback is the same skeleton the page shows while loading, so the route prerenders as a static shell (◐ in the build output).
+- **Data:** `GET /api/projects/{id}?days=1|7|30` via `fetchCoin`. A range change refetches, and the old chart stays visible (dimmed) until the new one arrives.
+- **Content:**
+  - back link to the list, carrying the list's search, sort and toggle;
+  - logo, name and symbol;
+  - 7 stats: price, market cap, FDV, 24h volume, TVL, max supply, total supply;
+  - **Criteria** checklist with ✓/✗ for the six rules, headed "Fails N of 6 rules, so it's not in the strict list." Failed rules are bold, with a red ✗ and "Fails";
+  - price chart with 1D / 7D / 30D.
+- **Chart** (`PriceChart.tsx` plus the pure `src/lib/chart.ts`, tested):
+  - inline SVG, no library: a line plus a light area fill, on a linear scale with 10% padding;
+  - the SVG stretches with `preserveAspectRatio="none"` and a non-scaling stroke. Labels, dots and the tooltip are HTML positioned in percent, so text never distorts;
+  - High label above its point and Low below. The last price and the % change over the range sit in the header above the chart, so labels can't collide;
+  - hover, or tap on touch screens, shows a tooltip with date and price. The chart is focusable: arrow keys, Home and End step through points, read out through an `aria-live` region;
+  - thin volume bars below the line ("24h volume, peak $X");
+  - `chart: null` shows a dashed placeholder with the `chart_error` text, and the rest of the page still works.
+- **States:**
+  - loading: skeleton with the same footprint as the page;
+  - 404: "Coin not found in the current scan", with an explanation and the back link;
+  - backend error: red block with Retry;
+  - warm-up 503: neutral note and auto-retry.
 
 ## Why the strict result is 0
 
@@ -75,28 +101,60 @@ Preview listings on CoinGecko are pre-launch tokens: they aren't trading yet, so
 - A 503 is treated as warm-up only when `detail` contains "warming". Other 503s are real errors with Retry.
 - `meta.cached` is not sent. Extra fields (`coingecko_url`, `detail_errors`, `age_seconds`, `last_error`, `preview_listed`, `tvl_above_min`, …) are ignored.
 
+### Coin detail: what we agreed vs. what the backend ships
+
+The agreed shape (in `lib/types.ts`):
+`{ project, passes: [{key, label, passed}], chart: {days, prices, total_volumes} | null, chart_error }`, with 404 → `{detail}`.
+
+The real `GET /api/projects/{id}` (backend commit `bbeeefa`) differs:
+
+| Agreed | Shipped |
+|---|---|
+| `passes` as an ordered array with labels | `passes` as an object `{market_cap, fdv, volume, supply, tvl, preview_listing: bool}`, without labels |
+| `chart.total_volumes` | `chart.volumes` |
+| top-level `chart_error` | `meta.chart_error` |
+| — | `null` values inside `prices` / `volumes` |
+| — | extra `details` and `meta.chart_cached` (ignored) |
+
+The 404 matches: `{"detail": "Unknown coin id '…' (not in the current market scan)"}`.
+
+I did not change the backend. `src/lib/coin.ts` (`normalizeCoin`, tested) accepts both shapes and drops null points. For the object form, the frontend supplies the six rule labels. Once the backend settles on one shape, the other branch can go.
+
 ## Limitations
 
-- No dark mode, no pagination or virtualization (the list is at most about 100 rows), and filters and the toggle aren't kept in the URL.
+- No dark mode, and no pagination or virtualization (the list is at most about 100 rows).
+- The chart range (1D/7D/30D) isn't in the URL; reopening a coin starts at 7D.
 - After the toggle in the empty state is clicked, the empty state is replaced by results, so keyboard focus returns to the page. The toolbar toggle shows the new state.
 - `NEXT_PUBLIC_API_URL` is fixed at build time.
 
 ## Next steps
 
-- Keep search, FDV, sort and the toggle in query params.
 - Show `meta.last_error` when a background refresh fails.
-- Link rows to `coingecko_url`, and add Playwright component tests for the states (the screenshot script below is a manual check, not shipped).
+- Link the coin page to `coingecko_url`, and add Playwright component tests for the states (the screenshot scripts below are a manual check, not shipped).
 
 ## AI workflow
 
 - **Generated:**
   - v1: scaffold, `lib/`, components.
   - v2 (this redesign): design proposal, Funnel, toolbar, phase logic, preview toggle, NOTES.
+  - v3: coin page (route, `CoinDetail`, `PriceChart`, `chart.ts`), list state in the URL (`listState.ts`), row links, response adapter (`coin.ts`).
   - All written with Claude Code.
 - **Verified:**
-  - lint, `npm test` (7 tests: search, FDV strict `<` and shorthand, sort, phases, funnel bottleneck), `npm run build`.
+  - lint, `npm run build`, and `npm test` with 12 tests:
+    - search, FDV strict `<` and shorthand, sort;
+    - phases, funnel bottleneck;
+    - URL state round-trip;
+    - chart geometry, nearest point;
+    - both detail response shapes.
   - A Playwright script outside the repo (mocks live only there) took screenshots at 1280 and 375 px of: loading, warming, scanning + progress, refreshing + progress, error unreachable, 502 with earlier data, empty from backend with funnel, empty without funnel, toggle on, empty after filters, data + header-click sort, keyboard focus. I looked at each one. The page never scrolls sideways at 375 px.
   - Against the live backend: strict result 0 with the real funnel, the toggle requests `?require_preview=false` and shows 107 rows, and requests go only to `localhost:8000` (plus the logo CDN).
+  - Coin page against the live backend (`origin-protocol`, reached via the list with `preview=ignore`), at 1280 and 375 px:
+    - a row click opens `/coins/origin-protocol?…list params…`;
+    - the back link restores search, toggle and sort;
+    - requests go only to `localhost:8000` (plus the logo CDN);
+    - no horizontal scroll.
+
+    Screenshots I looked at: 7D, 1D, 30D, hover, touch tap (375), and from fake responses: loading, chart `null`, 502 error, plus the real 404.
 - **Corrected after looking at screenshots:**
   - Sort selects overflowed by 183 px (`w-full` beat `w-auto`).
   - Funnel bars were centred on multi-line labels.
@@ -106,3 +164,10 @@ Preview listings on CoinGecko are pre-launch tokens: they aren't trading yet, so
   - Skeleton rows during an error looked like loading.
   - The funnel path in the empty state wrapped mid-step.
   - The first mock for "502 with data" was wrong: StrictMode's aborted request used up the data response.
+  - Coin page:
+    - The empty tooltip at 375 px was a script bug: the chart was below the viewport and `mouse.move` there fires nothing. Fixed by scrolling it into view.
+    - A tap on touch screens didn't show the tooltip: there's no `pointermove` and `pointerleave` cleared it right away. Fixed with `onPointerDown` and keeping the point after a touch.
+    - `touch-none` on the chart would have blocked page scrolling on phones; it's `touch-pan-y` now.
+    - The "Last" label collided with "High" when the high was near the end, so the last price moved to the chart header.
+    - An empty grey cell in the 7-stat grid at 2 and 4 columns, in both the page and the skeleton.
+    - A missing period in the chart-error text.
